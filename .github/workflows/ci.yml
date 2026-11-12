@@ -8,6 +8,15 @@ permissions:
   contents: read
 
 jobs:
+  rules:
+    name: Model house rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No heap, STL containers, lambdas or platform headers in model/
+        run: sh ci/check-model-rules.sh
+
   # The library must build with a plain C++17 compiler and nothing but its own include
   # directories and ArduinoJson (fetched by CMakeLists.txt): an Arduino, ESP-IDF or
   # FreeRTOS header in any source or header fails here. The same build runs the Unity suites.
