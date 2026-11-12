@@ -1,0 +1,27 @@
+# CMake build trees
+build/
+build-*/
+
+# PlatformIO
+.pio/
+
+# macOS Finder metadata
+.DS_Store
+
+# Personal LLM coding-assistant configs. See CONTRIBUTING.md.
+AGENTS.md
+CLAUDE.md
+CLAUDE.local.md
+GEMINI.md
+.beads/
+.claude/
+.cursor/
+.codeium/
+.windsurf/
+.aider*
+.continuerules
+
+# Editor and language-server state
+.vscode/
+.cache/
+compile_commands.json

@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # The library must build with a plain C++17 compiler and nothing but its own include
+  # directories and ArduinoJson (fetched by CMakeLists.txt): an Arduino, ESP-IDF or
+  # FreeRTOS header in any source or header fails here. The same build runs the Unity suites.
+  host:
+    name: Host build and tests (${{ matrix.cxx }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+
+      - name: Build
+        run: cmake --build build -j --verbose
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # The library through library.json on the ESP32 toolchain esp32-firmware uses.
+  esp32:
+    name: ESP32 build (esp32-poe-iso)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            !~/.platformio/penv
+          key: pio-${{ hashFiles('ci/esp32/platformio.ini', 'library.json') }}
+          restore-keys: pio-
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build
+        run: pio run -d ci/esp32
