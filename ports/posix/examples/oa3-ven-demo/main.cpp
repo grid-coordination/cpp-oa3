@@ -27,11 +27,12 @@ const char kUsage[] =
     "  --horizon ISO8601    window parsed from now (default PT24H)\n"
     "  --cacert PATH        trusted CA bundle (default: the system store)\n"
     "  --insecure           skip TLS peer and host verification (HTTPS and MQTTS)\n"
+    "  --allow-plaintext    accept an http:// base URL, and mqtt:// or tcp:// when no TLS\n"
+    "                       URI is offered (not conformant to OpenADR 3)\n"
     "  --notifications off|mqtt\n"
     "                       follow the program's MQTT notifications (default off)\n"
     "  --mqtt-client-id ID  MQTT client id (default oa3-ven-demo-<pid>)\n"
     "  --mqtt-uri URI       broker URI, used instead of the VTN's /notifiers\n"
-    "  --mqtt-allow-plain   accept mqtt:// or tcp:// when no TLS URI is offered\n"
     "  --mqtt-cacert PATH   trusted CA bundle for MQTTS (default: OpenSSL's default paths)\n"
     "  --exclusive-tls      close MQTTS around each HTTPS request (as on the classic ESP32)\n"
     "  --notify-poll SECONDS\n"
@@ -141,7 +142,7 @@ int main(int argc, char** argv) {
     oa3::NotificationMode notifications = oa3::NotificationMode::kOff;
     const char* mqtt_client_id = nullptr;
     const char* mqtt_uri = nullptr;
-    bool mqtt_allow_plain = false;
+    bool allow_plaintext = false;
     const char* mqtt_cacert = nullptr;
     bool exclusive_tls = false;
     unsigned long notify_poll_s = 0;
@@ -175,8 +176,8 @@ int main(int argc, char** argv) {
             mqtt_client_id = v;
         } else if ((v = flag_value(argc, argv, &i, "--mqtt-uri"))) {
             mqtt_uri = v;
-        } else if (strcmp(argv[i], "--mqtt-allow-plain") == 0) {
-            mqtt_allow_plain = true;
+        } else if (strcmp(argv[i], "--allow-plaintext") == 0) {
+            allow_plaintext = true;
         } else if ((v = flag_value(argc, argv, &i, "--mqtt-cacert"))) {
             mqtt_cacert = v;
         } else if (strcmp(argv[i], "--exclusive-tls") == 0) {
@@ -235,7 +236,7 @@ int main(int argc, char** argv) {
     config.notifications = notifications;
     config.mqtt_client_id = mqtt_client_id;
     config.mqtt_uri = mqtt_uri;
-    config.mqtt_allow_plain = mqtt_allow_plain;
+    config.allow_plaintext = allow_plaintext;
     config.mqtt_verify = !insecure;
     config.exclusive_tls = exclusive_tls;
     if (notify_poll_s) config.notify_poll_period_s = static_cast<uint32_t>(notify_poll_s);

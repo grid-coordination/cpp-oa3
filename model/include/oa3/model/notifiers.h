@@ -58,9 +58,8 @@ struct BrokerAddress {
 };
 
 // mqtts:// and ssl:// are TLS (default port 8883); mqtt:// and tcp:// are plain (1883).
-// Schemes are case-insensitive. A missing or unknown scheme reads as plain. An IPv6 literal
-// is kept without its brackets. False when the host is empty or too long, or the port is not
-// 1..65535.
+// Schemes are case-insensitive. An IPv6 literal is kept without its brackets. False for any
+// other or a missing scheme, an empty or too long host, or a port that is not 1..65535.
 bool parse_broker_uri(const char* uri, BrokerAddress* out);
 
 // The first TLS URI that parses; failing that, when allow_plain, the first plain one. False

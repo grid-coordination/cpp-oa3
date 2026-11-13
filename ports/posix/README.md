@@ -40,10 +40,10 @@ build-posix/oa3-ven-demo --program EELEC-012041131 --notifications mqtt --verbos
 | `--horizon ISO8601` | `PT24H` |
 | `--cacert PATH` | the system CA store |
 | `--insecure` | off; skips TLS peer and host verification, for HTTPS and MQTTS |
+| `--allow-plaintext` | off; admits an `http://` base URL, and `mqtt://` and `tcp://` when no TLS URI is offered ([`doc/porting.md`](../../doc/porting.md#plaintext)) |
 | `--notifications off\|mqtt` | `off`; `mqtt` follows the program's notifications from the VTN's broker |
 | `--mqtt-client-id ID` | `oa3-ven-demo-<pid>` |
 | `--mqtt-uri URI` | none; used instead of the URIs `/notifiers` advertises |
-| `--mqtt-allow-plain` | off; admits `mqtt://` and `tcp://` when no TLS URI is offered |
 | `--mqtt-cacert PATH` | OpenSSL's default CA paths |
 | `--exclusive-tls` | off; closes the MQTTS session around each HTTPS request, as on the classic ESP32 |
 | `--notify-poll SECONDS` | 3600; the poll period while subscribed |

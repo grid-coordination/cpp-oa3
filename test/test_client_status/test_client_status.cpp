@@ -232,6 +232,7 @@ static void test_start_rejections() {
     char near_limit_url[OA3_URL_MAX - 120];
     memset(near_limit_url, 'u', sizeof(near_limit_url) - 1);
     near_limit_url[sizeof(near_limit_url) - 1] = '\0';
+    memcpy(near_limit_url, "https://", 8);
 
     oa3::VenConfig c;
     TEST_ASSERT_TRUE(client.start(config()));
@@ -363,7 +364,7 @@ static void test_mqtt_start_rejections() {
     TEST_ASSERT_TRUE(mqtt_client.start(c));
     c.mqtt_uri = "mqtt://b:1883";
     TEST_ASSERT_FALSE(mqtt_client.start(c));
-    c.mqtt_allow_plain = true;
+    c.allow_plaintext = true;
     TEST_ASSERT_TRUE(mqtt_client.start(c));
     c.mqtt_uri = "mqtts://b:99999";
     TEST_ASSERT_FALSE(mqtt_client.start(c));

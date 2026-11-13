@@ -323,14 +323,16 @@ bool parse_broker_uri(const char* uri, BrokerAddress* out) {
     if (uri == nullptr) {
         return false;
     }
-    const char* rest = uri;
-    bool tls = false;
     const char* sep = strstr(uri, "://");
-    if (sep != nullptr) {
-        const size_t n = static_cast<size_t>(sep - uri);
-        tls = iequals_n(uri, n, "mqtts") || iequals_n(uri, n, "ssl");
-        rest = sep + 3;
+    if (sep == nullptr) {
+        return false;
     }
+    const size_t n = static_cast<size_t>(sep - uri);
+    const bool tls = iequals_n(uri, n, "mqtts") || iequals_n(uri, n, "ssl");
+    if (!tls && !iequals_n(uri, n, "mqtt") && !iequals_n(uri, n, "tcp")) {
+        return false;
+    }
+    const char* rest = sep + 3;
     size_t end = strcspn(rest, "/?#");
     const char* auth = rest;
     for (size_t i = 0; i < end; ++i) {

@@ -280,7 +280,7 @@ static void test_no_get_while_connected_over_a_day() {
 static void test_plain_broker_is_not_suspended() {
     oa3::VenConfig c = config();
     c.mqtt_uri = "mqtt://plain.example";
-    c.mqtt_allow_plain = true;
+    c.allow_plaintext = true;
     rig.start(c);
     rig.http.push_ok(fakes::kEventTopicsBody);
     rig.http.push_ok(fakes::kProgramTopicsBody);

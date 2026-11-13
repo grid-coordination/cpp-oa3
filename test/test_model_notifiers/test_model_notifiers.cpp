@@ -209,9 +209,6 @@ static void test_broker_schemes() {
     assert_broker("Ssl://b", "b", 8883, true);
     assert_broker("MQTT://b", "b", 1883, false);
     assert_broker("TCP://b:1884", "b", 1884, false);
-    assert_broker("ws://b", "b", 1883, false);
-    assert_broker("b.example.com", "b.example.com", 1883, false);
-    assert_broker("b.example.com:2000", "b.example.com", 2000, false);
     assert_broker("mqtts://user:pw@b:9000/path?q#f", "b", 9000, true);
     assert_broker("mqtts://b/", "b", 8883, true);
     assert_broker("mqtts://b:", "b", 8883, true);
@@ -228,6 +225,15 @@ static void test_broker_ipv6() {
 static void test_broker_bad() {
     assert_bad(nullptr);
     assert_bad("");
+    assert_bad("ws://b");
+    assert_bad("wss://b:443/mqtt");
+    assert_bad("https://b");
+    assert_bad("foo://b");
+    assert_bad("://b");
+    assert_bad(" mqtts://b");
+    assert_bad("mqtts:/b");
+    assert_bad("b.example.com");
+    assert_bad("b.example.com:8883");
     assert_bad("mqtts://");
     assert_bad("mqtts://:8883");
     assert_bad("mqtts://b:0");
@@ -258,6 +264,10 @@ static void test_select_broker() {
     TEST_ASSERT_TRUE(oa3::select_broker(n.mqtt, true, &b));
     TEST_ASSERT_FALSE(b.tls);
     TEST_ASSERT_EQUAL_STRING("p", b.host);
+
+    TEST_ASSERT_EQUAL(ParseResult::kOk,
+                      notifiers(R"({"WEBHOOK":true,"MQTT":{"URIS":["wss://b:443/mqtt","ws://b"]}})"));
+    TEST_ASSERT_FALSE(oa3::select_broker(n.mqtt, true, &b));
 
     TEST_ASSERT_EQUAL(ParseResult::kOk, notifiers(R"({"WEBHOOK":true,"MQTT":{"URIS":[]}})"));
     TEST_ASSERT_FALSE(oa3::select_broker(n.mqtt, true, &b));

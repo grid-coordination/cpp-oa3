@@ -88,6 +88,10 @@ enum class NotificationMode : uint8_t { kOff, kMqtt };
 struct VenConfig {
     const char* base_url = nullptr;  // up to the spec version segment, e.g.
                                      // https://price.grid-coordination.energy/openadr3/3.1.0
+    // The spec requires HTTPS and MQTTS (Definition.md, HTTPS/TLS and MQTT). This admits an
+    // http:// base URL and mqtt:// or tcp:// brokers, the latter only when no TLS URI is
+    // offered; the client logs a warning the first time after start() that it uses each.
+    bool allow_plaintext = false;
     // At least one. With program_id, GET /programs/<id>, and a program_name must then match;
     // otherwise program_name is resolved through /programs pages.
     const char* program_name = nullptr;
@@ -121,8 +125,6 @@ struct VenConfig {
     const char* mqtt_client_id = nullptr;  // required with kMqtt
     // Used instead of the /notifiers URIs, e.g. for a VTN that advertises an unreachable one.
     const char* mqtt_uri = nullptr;
-    // The spec requires MQTTS; this admits mqtt:// and tcp:// when no TLS URI is offered.
-    bool mqtt_allow_plain = false;
     bool mqtt_verify = true;
     const char* mqtt_ca_pem = nullptr;  // not copied: must outlive the client
     uint16_t mqtt_keepalive_s = 60;
@@ -265,6 +267,7 @@ private:
     void mqtt_fail(MqttResult r, uint32_t now_ms);
     void mqtt_retry(uint32_t now_ms, bool at_once);
     void mqtt_unavailable(uint32_t now_ms, const char* why);
+    void broker_selected();
     void mqtt_reset();
     void mqtt_close();
     void add_wanted(const char* topic);
@@ -340,6 +343,7 @@ private:
     bool _mqtt_no_session;  // exclusive_tls: the last connect found no session on the broker
     BrokerAddress _broker;
     bool _has_broker;
+    bool _plain_mqtt_warned;
     uint8_t _wanted_count;
     uint8_t _subscribed_count;
     NotifyState _reported_notify;

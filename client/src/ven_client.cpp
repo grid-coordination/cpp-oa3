@@ -96,6 +96,25 @@ bool newer(bool has_a, const DateTime& a, bool has_b, const DateTime& b) {
     return has_a && has_b && compare(a, b) > 0;
 }
 
+bool scheme_is(const char* url, const char* scheme) {
+    const size_t n = strlen(scheme);
+    for (size_t i = 0; i < n; ++i) {
+        char c = url[i];
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+        if (c != scheme[i]) {
+            return false;
+        }
+    }
+    return strncmp(url + n, "://", 3) == 0;
+}
+
+void warn_plaintext(const LogSink& log, const char* what) {
+    log_printf(log, LogLevel::kWarn, "%s without TLS: unencrypted, and not conformant to OpenADR 3",
+               what);
+}
+
 bool reached(uint32_t now_ms, uint32_t at_ms) { return static_cast<int32_t>(now_ms - at_ms) >= 0; }
 
 bool in_list(const char (&list)[OA3_MQTT_TOPICS_MAX][OA3_TOPIC_MAX + 1], size_t count,
@@ -208,6 +227,7 @@ VenClient::VenClient(HttpTransport& http, Clock& clock, const VenStorage& storag
       _mqtt_no_session(false),
       _broker(),
       _has_broker(false),
+      _plain_mqtt_warned(false),
       _wanted_count(0),
       _subscribed_count(0),
       _reported_notify(NotifyState::kOff),
@@ -224,6 +244,10 @@ bool VenClient::start(const VenConfig& config) {
     _reported_notify = NotifyState::kOff;
 
     if (config.base_url == nullptr || strlen(config.base_url) > OA3_URL_MAX) {
+        return false;
+    }
+    const bool plain_http = scheme_is(config.base_url, "http");
+    if (!scheme_is(config.base_url, "https") && !(plain_http && config.allow_plaintext)) {
         return false;
     }
     if (config.program_name == nullptr && config.program_id == nullptr) {
@@ -269,7 +293,7 @@ bool VenClient::start(const VenConfig& config) {
         if (config.mqtt_uri != nullptr) {
             BrokerAddress b;
             if (strlen(config.mqtt_uri) > OA3_NOTIFIER_URI_MAX ||
-                !parse_broker_uri(config.mqtt_uri, &b) || (!b.tls && !config.mqtt_allow_plain)) {
+                !parse_broker_uri(config.mqtt_uri, &b) || (!b.tls && !config.allow_plaintext)) {
                 return false;
             }
         }
@@ -371,6 +395,10 @@ bool VenClient::start(const VenConfig& config) {
     _evaluated = false;
     _evaluated_at = DateTime{};
     _phase = Phase::kResolving;
+    _plain_mqtt_warned = false;
+    if (plain_http) {
+        warn_plaintext(_config.log, "HTTP");
+    }
     return true;
 }
 
@@ -970,6 +998,13 @@ void VenClient::mqtt_unavailable(uint32_t now_ms, const char* why) {
     _mqtt_next_ms = now_ms + _config.poll_period_s * 1000;
 }
 
+void VenClient::broker_selected() {
+    if (!_broker.tls && !_plain_mqtt_warned) {
+        _plain_mqtt_warned = true;
+        warn_plaintext(_config.log, "MQTT");
+    }
+}
+
 void VenClient::mqtt_retry(uint32_t now_ms, bool at_once) {
     if (_status.mqtt_failures < UINT16_MAX) {
         ++_status.mqtt_failures;
@@ -1047,6 +1082,7 @@ void VenClient::mqtt_request(uint32_t now_ms) {
         if (_config.mqtt_uri != nullptr) {
             _has_broker = parse_broker_uri(_mqtt_uri, &_broker);
             _mqtt_step = MqttStep::kEventTopics;
+            broker_selected();
         } else {
             _has_broker = false;
             build_notifiers_url(_url, sizeof(_url), _base_url);
@@ -1058,13 +1094,18 @@ void VenClient::mqtt_request(uint32_t now_ms) {
                 mqtt_unavailable(now_ms, "no MQTT binding");
             } else if (m.auth != MqttAuthMethod::kAnonymous) {
                 mqtt_unavailable(now_ms, to_string(m.auth));
-            } else if (!select_broker(m, _config.mqtt_allow_plain, &_broker)) {
-                mqtt_unavailable(now_ms, m.uri_count > 0 ? "no usable URI" : "no URI");
+            } else if (!select_broker(m, _config.allow_plaintext, &_broker)) {
+                BrokerAddress plain;
+                mqtt_unavailable(now_ms, m.uri_count == 0 ? "no URI"
+                                         : !_config.allow_plaintext && select_broker(m, true, &plain)
+                                             ? "only plaintext URIs, and allow_plaintext is off"
+                                             : "no usable URI");
             } else {
                 _has_broker = true;
                 _mqtt_step = MqttStep::kEventTopics;
                 log_printf(_config.log, LogLevel::kInfo, "broker %s:%u%s", _broker.host,
                            static_cast<unsigned>(_broker.port), _broker.tls ? " tls" : "");
+                broker_selected();
             }
             return;
         }

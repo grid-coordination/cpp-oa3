@@ -159,11 +159,11 @@ static void test_unavailable_with_oauth() {
 static const char kPlainOnly[] =
     R"({"WEBHOOK":false,"MQTT":{"URIS":["mqtt://plain.example:1883"],"authentication":{"method":"ANONYMOUS"}}})";
 
-static void test_plain_only_without_allow_plain() { assert_unavailable(kPlainOnly); }
+static void test_plain_only_without_allow_plaintext() { assert_unavailable(kPlainOnly); }
 
-static void test_plain_only_with_allow_plain() {
+static void test_plain_only_with_allow_plaintext() {
     oa3::VenConfig c = rig.config();
-    c.mqtt_allow_plain = true;
+    c.allow_plaintext = true;
     rig.start(c);
     rig.http.push_ok(kPlainOnly);
     rig.http.push_ok(fakes::kEventTopicsBody);
@@ -347,8 +347,8 @@ int main() {
     RUN_TEST(test_unavailable_without_uris);
     RUN_TEST(test_unavailable_with_certificate);
     RUN_TEST(test_unavailable_with_oauth);
-    RUN_TEST(test_plain_only_without_allow_plain);
-    RUN_TEST(test_plain_only_with_allow_plain);
+    RUN_TEST(test_plain_only_without_allow_plaintext);
+    RUN_TEST(test_plain_only_with_allow_plaintext);
     RUN_TEST(test_mqtt_uri_override_skips_notifiers);
     RUN_TEST(test_backoff_schedule);
     RUN_TEST(test_unavailable_on_missing_route);
