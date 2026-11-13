@@ -19,9 +19,29 @@ public:
     uint32_t monotonic_ms() override { return millis(); }
 };
 
+class StubMqtt : public oa3::MqttSession {
+public:
+    oa3::MqttResult connect(const oa3::MqttConnectOptions&, bool*) override {
+        return oa3::MqttResult::kConnectFailed;
+    }
+    void disconnect() override {}
+    oa3::MqttResult subscribe(const char*, uint8_t, uint32_t) override {
+        return oa3::MqttResult::kNotConnected;
+    }
+    oa3::MqttResult unsubscribe(const char*, uint32_t) override {
+        return oa3::MqttResult::kNotConnected;
+    }
+    oa3::MqttResult poll(uint32_t, oa3::MqttMessageFn, void*) override {
+        return oa3::MqttResult::kNotConnected;
+    }
+    bool connected() const override { return false; }
+};
+
 static StubTransport transport;
 static StubClock clock_;
+static StubMqtt mqtt;
 static oa3::StaticVenStorage<> storage;
+static oa3::NotificationStorage notes;
 
 void setup() {
     Serial.begin(115200);
@@ -29,10 +49,15 @@ void setup() {
                   oa3::spec_version(), static_cast<unsigned>(sizeof(oa3::Event)),
                   static_cast<unsigned>(OA3_MAX_EVENTS));
 
-    static oa3::VenClient client(transport, clock_, storage.storage());
+    oa3::VenStorage mem = storage.storage();
+    mem.notifications = &notes;
+    static oa3::VenClient client(transport, clock_, mem, &mqtt);
     oa3::VenConfig config{};
     config.base_url = "https://price.grid-coordination.energy/openadr3/3.1.0";
     config.program_name = "EELEC-012041131";
+    config.notifications = oa3::NotificationMode::kMqtt;
+    config.exclusive_tls = true;
+    config.mqtt_client_id = "oa3-esp32-ci";
     if (client.start(config)) {
         client.loop();
     }

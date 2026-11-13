@@ -32,8 +32,20 @@
 #define OA3_EVENT_PAGES_MAX 20
 #endif
 
+// Topics subscribed at once: a program's events CREATE, UPDATE and DELETE and the program's
+// own UPDATE, DELETE and CREATE, when the VTN lists no ALL topic.
+#ifndef OA3_MQTT_TOPICS_MAX
+#define OA3_MQTT_TOPICS_MAX 6
+#endif
+
+// MQTT 3.1.1 servers must accept 1 to 23 characters; most accept more.
+#ifndef OA3_MQTT_CLIENT_ID_MAX
+#define OA3_MQTT_CLIENT_ID_MAX 63
+#endif
+
 static_assert(OA3_PROGRAMS_PAGE_LIMIT >= 1 && OA3_PROGRAMS_PAGE_LIMIT <= 50,
               "openadr3.yaml limit is 0..50");
 static_assert(OA3_EVENTS_PAGE_LIMIT >= 1 && OA3_EVENTS_PAGE_LIMIT <= 50,
               "openadr3.yaml limit is 0..50");
 static_assert(OA3_EVENT_PAGES_MAX >= 1, "at least one /events page");
+static_assert(OA3_MQTT_TOPICS_MAX >= 2 && OA3_MQTT_TOPICS_MAX <= 255, "events and program topics");

@@ -167,6 +167,46 @@ bool build_events_url(char* buffer, size_t size, const char* base_url, const cha
     return b.ok();
 }
 
+bool build_notifiers_url(char* buffer, size_t size, const char* base_url) {
+    if (base_url == nullptr) {
+        return false;
+    }
+    UrlBuilder b(buffer, size);
+    b.append(base_url).append_path("notifiers");
+    return b.ok();
+}
+
+bool build_program_topics_url(char* buffer, size_t size, const char* base_url,
+                              const char* program_id) {
+    if (base_url == nullptr || program_id == nullptr) {
+        return false;
+    }
+    UrlBuilder b(buffer, size);
+    b.append(base_url)
+        .append_path("notifiers")
+        .append_path("mqtt")
+        .append_path("topics")
+        .append_path("programs")
+        .append_path(program_id);
+    return b.ok();
+}
+
+bool build_program_events_topics_url(char* buffer, size_t size, const char* base_url,
+                                     const char* program_id) {
+    if (base_url == nullptr || program_id == nullptr) {
+        return false;
+    }
+    UrlBuilder b(buffer, size);
+    b.append(base_url)
+        .append_path("notifiers")
+        .append_path("mqtt")
+        .append_path("topics")
+        .append_path("programs")
+        .append_path(program_id)
+        .append_path("events");
+    return b.ok();
+}
+
 bool is_object_id(const char* s) {
     if (s == nullptr || s[0] == '\0') {
         return false;

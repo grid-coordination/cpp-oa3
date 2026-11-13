@@ -6,7 +6,7 @@ The library is the core only. A port supplies HTTP, MQTT, mDNS and the clock; th
 
 ## Status
 
-0.1.0. `oa3_model` (time, entities, streaming parse, intervals and prices) and `oa3_client` (`VenClient`, a polling VEN), with a POSIX port. An ESP32 port in esp32-firmware has run it on an Olimex ESP32-POE-ISO-WROVER against the price server; [`doc/porting.md`](doc/porting.md) describes what a port supplies. MQTT notifications are next.
+0.1.0 has `oa3_model` (time, entities, streaming parse, intervals and prices) and `oa3_client` (`VenClient`, a polling VEN), with a POSIX port. An ESP32 port in esp32-firmware has run it on an Olimex ESP32-POE-ISO-WROVER against the price server; [`doc/porting.md`](doc/porting.md) describes what a port supplies. `main` adds MQTT notifications, not yet released.
 
 ## Building on a host
 
@@ -28,15 +28,16 @@ pio run -d ci/esp32
 
 ## POSIX demo
 
-`ports/posix` builds the library with a libcurl transport and `oa3-ven-demo`, which polls one program on a VTN and prints the price in force. It needs libcurl ([`ports/posix/README.md`](ports/posix/README.md)).
+`ports/posix` builds the library with a libcurl transport, a Paho MQTT C session and `oa3-ven-demo`, which follows one program on a VTN and prints the price in force. It needs libcurl and OpenSSL (on macOS, Homebrew `openssl@3`); CMake fetches Paho MQTT C ([`ports/posix/README.md`](ports/posix/README.md)).
 
 ```bash
 cmake -S ports/posix -B build-posix
 cmake --build build-posix -j
 build-posix/oa3-ven-demo --program EELEC-012041131 --poll 60 --verbose
+build-posix/oa3-ven-demo --program EELEC-012041131 --notifications mqtt --verbose
 ```
 
-The default VTN is the price server, `https://price.grid-coordination.energy/openadr3/3.1.0`. Each price change prints a line such as `2026-11-13T02:00:00Z..2026-11-13T03:00:00Z  0.108155 USD/KWH  next 2026-11-13T03:00:00Z`; status changes print on stdout and the library's log on stderr. Ctrl-C stops it.
+The default VTN is the price server, `https://price.grid-coordination.energy/openadr3/3.1.0`; with `--notifications mqtt` the demo also subscribes to the program's notifications on the broker the VTN advertises. Each price change prints a line such as `2026-11-13T02:00:00Z..2026-11-13T03:00:00Z  0.108155 USD/KWH  next 2026-11-13T03:00:00Z`; status changes print on stdout and the library's log on stderr. Ctrl-C stops it.
 
 ## Related projects
 

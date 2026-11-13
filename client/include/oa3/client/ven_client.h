@@ -7,9 +7,11 @@
 #include <oa3/client/http_transport.h>
 #include <oa3/client/limits.h>
 #include <oa3/client/log.h>
+#include <oa3/client/mqtt_session.h>
 #include <oa3/model/entities.h>
 #include <oa3/model/json_arena.h>
 #include <oa3/model/limits.h>
+#include <oa3/model/notifiers.h>
 #include <oa3/model/parse.h>
 #include <oa3/model/time.h>
 #include <oa3/model/time_interval.h>
@@ -31,6 +33,21 @@ enum class VenStatus : uint8_t {
 
 const char* to_string(VenStatus s);
 
+// The MQTT side. Everything but kOff and kUnavailable comes only with NotificationMode::kMqtt
+// once the program is resolved.
+enum class NotifyState : uint8_t {
+    kOff,
+    kDiscovering,   // fetching /notifiers or topics
+    kUnavailable,   // no MQTT binding, no usable URI, or an auth method the client lacks;
+                    // discovery is retried every poll_period_s
+    kConnecting,    // topics in hand; connecting, subscribing, or snapshotting /events
+    kConnected,     // subscribed; events are polled every notify_poll_period_s
+    kSuspended,     // exclusive_tls: closed for an HTTPS request, resumed after it
+    kDisconnected,  // lost or failed; a new cycle starts after backoff
+};
+
+const char* to_string(NotifyState s);
+
 struct VenStatusInfo {
     VenStatus status;
     HttpResult http_result;    // of the last request; kOk before the first
@@ -39,6 +56,10 @@ struct VenStatusInfo {
     uint16_t consecutive_failures;
     uint32_t retry_in_ms;  // until the next request, as of this report
     bool has_data;         // events from a successful fetch are held
+    NotifyState notify;
+    MqttResult mqtt_result;  // of the last MQTT call; kOk before the first
+    uint16_t mqtt_failures;  // consecutive failed connect cycles and losses
+    uint32_t notifications;  // event and program notifications applied since start()
 };
 
 // The value of the configured payload type in force now. Text fields are copies.
@@ -59,6 +80,8 @@ struct PriceInfo {
 
 typedef void (*PriceChangeFn)(void* ctx, const PriceInfo& price);
 typedef void (*VenStatusFn)(void* ctx, const VenStatusInfo& status);
+
+enum class NotificationMode : uint8_t { kOff, kMqtt };
 
 // start() copies the strings, so they need not outlive it. Set fields on a value-initialized
 // config (VenConfig c{}; c.base_url = ...); fields added later keep this working.
@@ -83,10 +106,48 @@ struct VenConfig {
     uint32_t backoff_max_s = 600;
     uint16_t stale_after_polls = 3;  // 0: never stale; times poll_period_s below 2^31 ms
     uint32_t http_timeout_ms = 15000;
+
+    // kMqtt needs an MqttSession and VenStorage::notification. After the program resolves:
+    // GET /notifiers, the program's events and program topics, connect, subscribe, and
+    // snapshot /events; again on every connect that does not resume a session.
+    NotificationMode notifications = NotificationMode::kOff;
+    // The poll period while subscribed; at least poll_period_s.
+    uint32_t notify_poll_period_s = 3600;
+    // At most one TLS session at a time (the classic ESP32): an MQTTS session is closed
+    // before each HTTPS request and resumed after it, with clean_session false and QoS 1 so
+    // the broker queues what arrives meanwhile. Until a resume finds the broker kept the
+    // session, events are polled every poll_period_s.
+    bool exclusive_tls = false;
+    const char* mqtt_client_id = nullptr;  // required with kMqtt
+    // Used instead of the /notifiers URIs, e.g. for a VTN that advertises an unreachable one.
+    const char* mqtt_uri = nullptr;
+    // The spec requires MQTTS; this admits mqtt:// and tcp:// when no TLS URI is offered.
+    bool mqtt_allow_plain = false;
+    bool mqtt_verify = true;
+    const char* mqtt_ca_pem = nullptr;  // not copied: must outlive the client
+    uint16_t mqtt_keepalive_s = 60;
+    uint32_t mqtt_timeout_ms = 15000;
+    // While subscribed, ms_until_due() is at most this, so the port's loop() picks messages
+    // up promptly.
+    uint32_t mqtt_poll_ms = 100;
+    // Also subscribes to the program's own topics: UPDATE refreshes the program, DELETE
+    // resolves it again.
+    bool follow_program = true;
+
     PriceChangeFn on_price_change = nullptr;
     VenStatusFn on_status = nullptr;
     void* ctx = nullptr;  // for both callbacks
     LogSink log = {};
+};
+
+// The client's working memory for NotificationMode::kMqtt. A notification is parsed into
+// notification before it is applied to the events.
+struct NotificationStorage {
+    Notification notification;
+    Notifiers notifiers;
+    OperationTopics topics;
+    char wanted[OA3_MQTT_TOPICS_MAX][OA3_TOPIC_MAX + 1];
+    char subscribed[OA3_MQTT_TOPICS_MAX][OA3_TOPIC_MAX + 1];
 };
 
 // Caller-owned memory, so a port can place it (e.g. in PSRAM). A fetch parses into scratch
@@ -96,6 +157,7 @@ struct VenStorage {
     Event* scratch;
     size_t capacity;  // elements in each array
     JsonArena* arena;
+    NotificationStorage* notifications = nullptr;  // required with NotificationMode::kMqtt
 };
 
 template <size_t N = OA3_MAX_EVENTS, size_t ArenaSize = OA3_JSON_ARENA_SIZE>
@@ -109,11 +171,12 @@ private:
     StaticJsonArena<ArenaSize> _arena;
 };
 
-// A polling VEN for one program. No threads: the port calls loop() from one task, and
-// every callback runs inside loop().
+// A VEN for one program that polls and, optionally, follows MQTT notifications. No threads:
+// the port calls loop() from one task, and every callback runs inside loop().
 class VenClient {
 public:
-    VenClient(HttpTransport& http, Clock& clock, const VenStorage& storage);
+    VenClient(HttpTransport& http, Clock& clock, const VenStorage& storage,
+              MqttSession* mqtt = nullptr);
 
     VenClient(const VenClient&) = delete;
     VenClient& operator=(const VenClient&) = delete;
@@ -121,9 +184,10 @@ public:
     // Validates and copies config, clears all state and data, and makes the first request due
     // at once. No I/O. False, leaving the client stopped, when the config is invalid.
     bool start(const VenConfig& config);
-    // Does what is due: at most one HTTP request, then the price check. Cheap otherwise.
+    // Does what is due: delivers MQTT messages, makes at most one HTTP request (with MQTT
+    // connect and subscribe calls around it), then the price check. Cheap otherwise.
     void loop();
-    // No further requests or callbacks; the data stays readable.
+    // Disconnects MQTT; no further requests or callbacks. The data stays readable.
     void stop();
     // Makes the next loop() fetch events, ignoring the poll period and backoff. Before the
     // program is resolved it has no effect.
@@ -143,6 +207,11 @@ public:
     size_t event_count() const { return _event_count; }
     // The wall-clock time of the last successful events fetch; false before one.
     bool last_fetch(DateTime* out) const;
+    // The broker in use; nullptr before one is selected.
+    const BrokerAddress* broker() const { return _has_broker ? &_broker : nullptr; }
+    // The topic filters subscribed in the current session.
+    size_t subscription_count() const { return _subscribed_count; }
+    const char* subscription(size_t i) const { return _storage.notifications->subscribed[i]; }
 
 private:
     enum class Phase : uint8_t { kStopped, kResolving, kPolling };
@@ -150,6 +219,22 @@ private:
     static void on_programs_response(void* ctx, int status, ByteReader& body);
     static void on_program_response(void* ctx, int status, ByteReader& body);
     static void on_events_response(void* ctx, int status, ByteReader& body);
+    static void on_notifiers_response(void* ctx, int status, ByteReader& body);
+    static void on_topics_response(void* ctx, int status, ByteReader& body);
+    static void on_message(void* ctx, const MqttMessage& message);
+
+    enum class MqttStep : uint8_t {
+        kIdle,
+        kNotifiers,
+        kEventTopics,
+        kProgramTopics,
+        kSnapshotBefore,  // exclusive_tls: /events while MQTT is closed, then connect
+        kConnect,
+        kSnapshotAfter,   // /events once subscribed
+        kLive,
+        kSuspended,
+        kBackoff,
+    };
 
     // Each request step returns true when the request failed.
     HttpResult request(HttpResponseFn on_response);
@@ -163,6 +248,32 @@ private:
     void check_clock_step(const DateTime& now, uint32_t now_ms);
     void update_price(const DateTime& now);
     void report(uint32_t now_ms, bool force);
+    uint32_t period_s() const;
+    uint32_t backoff_ms(uint16_t failures) const;
+    bool mqtt_connected_step() const;
+    bool mqtt_timed_step() const;
+    void mqtt_request(uint32_t now_ms);
+    void mqtt_service(const DateTime& now, uint32_t now_ms);
+    bool mqtt_discover(HttpResponseFn on_response, const char* what, uint32_t now_ms);
+    void mqtt_discovered(uint32_t now_ms);
+    void mqtt_after_poll(uint32_t now_ms);
+    bool mqtt_connect(bool clean_session, bool* session_present, uint32_t now_ms);
+    bool mqtt_subscribe(bool session_present, uint32_t now_ms);
+    void mqtt_go_live();
+    void mqtt_suspend();
+    void mqtt_resume(uint32_t now_ms);
+    void mqtt_fail(MqttResult r, uint32_t now_ms);
+    void mqtt_retry(uint32_t now_ms, bool at_once);
+    void mqtt_unavailable(uint32_t now_ms, const char* why);
+    void mqtt_reset();
+    void mqtt_close();
+    void add_wanted(const char* topic);
+    void add_wanted(const OperationTopics& topics);
+    void handle_message(const MqttMessage& message);
+    void apply_notification(bool retained);
+    bool upsert_event(const Event& ev);
+    void remove_event(size_t i);
+    size_t find_event(const char* id) const;
 
     HttpTransport* _http;
     Clock* _clock;
@@ -219,6 +330,22 @@ private:
     TimeInterval _window;
     ParseOptions _options;
     char _url[OA3_URL_MAX + 1];
+
+    MqttSession* _mqtt;
+    char _client_id[OA3_MQTT_CLIENT_ID_MAX + 1];
+    char _mqtt_uri[OA3_NOTIFIER_URI_MAX + 1];
+    MqttStep _mqtt_step;
+    uint32_t _mqtt_next_ms;
+    bool _mqtt_open;        // connect() called and disconnect() not since
+    bool _mqtt_no_session;  // exclusive_tls: the last connect found no session on the broker
+    BrokerAddress _broker;
+    bool _has_broker;
+    uint8_t _wanted_count;
+    uint8_t _subscribed_count;
+    NotifyState _reported_notify;
+    bool _program_deleted;  // set by a notification, acted on once poll() returns
+    bool _has_msg_window;
+    TimeInterval _msg_window;  // [now, now + horizon) of the loop() delivering messages
 };
 
 }  // namespace oa3

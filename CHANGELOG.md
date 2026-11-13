@@ -4,6 +4,16 @@ All notable changes to `cpp-oa3` are recorded here. Format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Added
+
+- MQTT notifications (milestone M4), with `VenConfig::notifications = NotificationMode::kMqtt`, a port's `MqttSession` and a caller-owned `NotificationStorage` in `VenStorage::notifications` (10,088 bytes on the ESP32; with notifications off the `ci/esp32` build uses 504 bytes more RAM than without M4):
+  - After the program resolves and the first `/events` fetch, the client reads `/notifiers` (or uses `mqtt_uri`), fetches the program's events topics and, with `follow_program`, the program's own topics, connects anonymously (MQTTS unless `mqtt_allow_plain`), subscribes at QoS 1 (the `ALL` topic when the VTN lists one), and fetches `/events` again. Every reconnect repeats the whole cycle: topics are fetched again, the subscriptions are set-diffed when the broker kept the session, and `/events` is fetched again.
+  - Event CREATE, UPDATE and DELETE notifications (POST and PUT read as CREATE and UPDATE) are applied to the held events within the window and capacity, by the same keep-earliest rule as a fetch; an older `modificationDateTime` is ignored. A retained CREATE or UPDATE applies only as a newer update of a stored event, and a CREATE or UPDATE of an event the last fetch lacked is ignored when modified before that fetch, so a broker's retained messages cannot restore a deleted event. A notification that arrives between two `/events` pages is applied after the last page. `on_price_change` fires without an HTTP request. A program UPDATE refreshes the program unless its `modificationDateTime` is older (or, retained, not newer); a program DELETE drops the events, reports no price in force and resolves the program again. An oversized or unparseable live notification triggers a fetch.
+  - While subscribed, `/events` is polled every `notify_poll_period_s`; when the session is lost or cannot be opened, polling returns to `poll_period_s` and reconnects back off from `backoff_min_s`. A VTN that answers discovery with 404, 405 or 501, or with a body the client cannot read, is `UNAVAILABLE` and is asked again every `poll_period_s`.
+  - `exclusive_tls`, for the classic ESP32: no HTTPS request while an MQTTS session may hold TLS. The session uses `clean_session` false; `disconnect()` is called before each HTTPS request and after any failed connect or subscribe, and the session is resumed after the request. Until a resume finds the broker kept the session, `/events` is polled every `poll_period_s`.
+  - `VenStatusInfo` reports `notify` (`NotifyState`), `mqtt_result`, `mqtt_failures` and `notifications`, and `on_status` fires when `notify` changes.
+- `oa3_model`: `parse_notifiers()` (the spec's object and the VTN-RI array), `parse_topics()`, `parse_broker_uri()` and `select_broker()`. `parse_notification()` accepts a DELETE whose object carries only its `id`.
+
 ## [0.1.0] - 2026-11-13
 
 First release: a polling OpenADR 3.1.0 VEN that runs on the ESP32. An ESP32 port in esp32-firmware ran it for 10 hours on an Olimex ESP32-POE-ISO-WROVER against the price server, following every hourly price change with no heap drift.

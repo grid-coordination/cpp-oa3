@@ -190,6 +190,24 @@ static void test_post_unsupported_by_default() {
                                              ignore_response, nullptr)));
 }
 
+static void test_notifier_urls() {
+    char buf[256];
+    const char* base = "https://vtn.example/openadr3/3.1.0";
+    TEST_ASSERT_TRUE(oa3::build_notifiers_url(buf, sizeof(buf), base));
+    TEST_ASSERT_EQUAL_STRING("https://vtn.example/openadr3/3.1.0/notifiers", buf);
+    TEST_ASSERT_TRUE(oa3::build_program_events_topics_url(buf, sizeof(buf), base, "p-1"));
+    TEST_ASSERT_EQUAL_STRING(
+        "https://vtn.example/openadr3/3.1.0/notifiers/mqtt/topics/programs/p-1/events", buf);
+    TEST_ASSERT_TRUE(oa3::build_program_topics_url(buf, sizeof(buf), base, "p-1"));
+    TEST_ASSERT_EQUAL_STRING("https://vtn.example/openadr3/3.1.0/notifiers/mqtt/topics/programs/p-1",
+                             buf);
+    TEST_ASSERT_TRUE(oa3::build_notifiers_url(buf, sizeof(buf), "https://vtn.example/"));
+    TEST_ASSERT_EQUAL_STRING("https://vtn.example/notifiers", buf);
+    TEST_ASSERT_FALSE(oa3::build_notifiers_url(buf, sizeof(buf), nullptr));
+    TEST_ASSERT_FALSE(oa3::build_program_topics_url(buf, sizeof(buf), base, nullptr));
+    TEST_ASSERT_FALSE(oa3::build_program_events_topics_url(buf, 60, base, "p-1"));
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_percent_encode);
@@ -204,6 +222,7 @@ int main() {
     RUN_TEST(test_events_url);
     RUN_TEST(test_is_object_id);
     RUN_TEST(test_post_unsupported_by_default);
+    RUN_TEST(test_notifier_urls);
     RUN_TEST(test_to_string);
     return UNITY_END();
 }
