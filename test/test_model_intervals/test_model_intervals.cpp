@@ -516,6 +516,82 @@ static void test_other_payload_type_inactive() {
     TEST_ASSERT_FALSE(oa3::price_at(nullptr, 3, ux("2026-11-14T08:30:00Z"), "PRICE", &p));
 }
 
+// --- price_schedule ------------------------------------------------------------------------
+
+static oa3::TimeInterval window(const char* start, const char* end) {
+    oa3::TimeInterval w{};
+    w.start = dt(start);
+    w.end = dt(end);
+    return w;
+}
+
+static void test_schedule_24h_across_events() {
+    build_price_server_events();
+    oa3::PriceStep steps[30];
+    bool more = true;
+    const oa3::TimeInterval w = window("2026-11-13T20:30:00Z", "2026-11-14T20:30:00Z");
+    size_t n = oa3::price_schedule(g_events, 3, w, "PRICE", steps, 30, &more);
+    TEST_ASSERT_FALSE(more);
+    TEST_ASSERT_EQUAL_size_t(25, n);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-13T20:30:00Z"), oa3::to_unix(steps[0].span.start));
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-13T21:00:00Z"), oa3::to_unix(steps[0].span.end));
+    TEST_ASSERT_EQUAL_PTR(&g_events[1], steps[0].event);
+    TEST_ASSERT_EQUAL_DOUBLE(0.06 + 0.001 * 12, steps[0].value->number);
+    TEST_ASSERT_EQUAL_PTR(&g_events[0], steps[12].event);
+    TEST_ASSERT_EQUAL_DOUBLE(0.050294, steps[12].value->number);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-14T20:00:00Z"), oa3::to_unix(steps[24].span.start));
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-14T20:30:00Z"), oa3::to_unix(steps[24].span.end));
+    for (size_t i = 1; i < n; ++i) {
+        TEST_ASSERT_EQUAL_INT64(oa3::to_unix(steps[i - 1].span.end),
+                                oa3::to_unix(steps[i].span.start));
+    }
+}
+
+static void test_schedule_gaps_have_no_value() {
+    build_price_server_events();
+    oa3::PriceStep steps[8];
+    oa3::TimeInterval w = window("2026-11-15T06:00:00Z", "2026-11-15T10:00:00Z");
+    size_t n = oa3::price_schedule(g_events, 3, w, "PRICE", steps, 8, nullptr);
+    TEST_ASSERT_EQUAL_size_t(3, n);
+    TEST_ASSERT_NOT_NULL(steps[0].value);
+    TEST_ASSERT_NOT_NULL(steps[1].value);
+    TEST_ASSERT_NULL(steps[2].value);
+    TEST_ASSERT_NULL(steps[2].event);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-15T08:00:00Z"), oa3::to_unix(steps[2].span.start));
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-15T10:00:00Z"), oa3::to_unix(steps[2].span.end));
+
+    w = window("2026-11-12T06:00:00Z", "2026-11-12T09:00:00Z");
+    n = oa3::price_schedule(g_events, 3, w, "PRICE", steps, 8, nullptr);
+    TEST_ASSERT_EQUAL_size_t(2, n);
+    TEST_ASSERT_NULL(steps[0].value);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-12T08:00:00Z"), oa3::to_unix(steps[0].span.end));
+    TEST_ASSERT_EQUAL_DOUBLE(0.057949, steps[1].value->number);
+}
+
+static void test_schedule_max_and_bad_windows() {
+    build_price_server_events();
+    oa3::PriceStep steps[4];
+    bool more = false;
+    oa3::TimeInterval w = window("2026-11-14T08:00:00Z", "2026-11-14T20:00:00Z");
+    size_t n = oa3::price_schedule(g_events, 3, w, "PRICE", steps, 4, &more);
+    TEST_ASSERT_EQUAL_size_t(4, n);
+    TEST_ASSERT_TRUE(more);
+
+    w = window("2026-11-14T08:00:00Z", "2026-11-14T08:00:00Z");
+    n = oa3::price_schedule(g_events, 3, w, "PRICE", steps, 4, &more);
+    TEST_ASSERT_EQUAL_size_t(0, n);
+    TEST_ASSERT_FALSE(more);
+    w = window("2026-11-14T09:00:00Z", "2026-11-14T08:00:00Z");
+    n = oa3::price_schedule(g_events, 3, w, "PRICE", steps, 4, &more);
+    TEST_ASSERT_EQUAL_size_t(0, n);
+    oa3::TimeInterval open = window("2026-11-14T08:00:00Z", "2026-11-14T09:00:00Z");
+    open.end_indefinite = true;
+    TEST_ASSERT_EQUAL_size_t(0, oa3::price_schedule(g_events, 3, open, "PRICE", steps, 4, &more));
+    w = window("2026-11-14T08:00:00Z", "2026-11-14T09:00:00Z");
+    TEST_ASSERT_EQUAL_size_t(0, oa3::price_schedule(g_events, 3, w, "PRICE", steps, 0, &more));
+    TEST_ASSERT_TRUE(more);
+}
+
 // User_Guide.md Example 7.3-1 (around :684-718)
 static void build_multi_price(const char* type) {
     Event& e = g_events[0];
@@ -858,6 +934,9 @@ int main() {
     RUN_TEST(test_before_every_event);
     RUN_TEST(test_after_every_event);
     RUN_TEST(test_other_payload_type_inactive);
+    RUN_TEST(test_schedule_24h_across_events);
+    RUN_TEST(test_schedule_gaps_have_no_value);
+    RUN_TEST(test_schedule_max_and_bad_windows);
     RUN_TEST(test_multi_valued_payload_sub_intervals);
     RUN_TEST(test_multi_valued_uneven_split);
     RUN_TEST(test_non_unitary_type_whole_span);

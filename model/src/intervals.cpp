@@ -335,4 +335,31 @@ bool price_at(const Event* events, size_t event_count, int64_t now_unix,
     return price_at(events, event_count, now, payload_type, out);
 }
 
+size_t price_schedule(const Event* events, size_t event_count, const TimeInterval& window,
+                      const char* payload_type, PriceStep* out, size_t max, bool* more) {
+    if (more) *more = false;
+    if (window.end_indefinite || compare(window.start, window.end) > 0) return 0;
+    DateTime t = window.start;
+    size_t n = 0;
+    while (compare(t, window.end) < 0) {
+        if (n == max) {
+            if (more) *more = true;
+            break;
+        }
+        PriceAt p;
+        price_at(events, event_count, t, payload_type, &p);
+        DateTime end = window.end;
+        if (p.has_next_change && compare(p.next_change, window.end) < 0) end = p.next_change;
+        if (compare(end, t) <= 0) break;
+        PriceStep& s = out[n++];
+        s.span.start = t;
+        s.span.end = end;
+        s.span.end_indefinite = false;
+        s.event = p.active ? p.event : nullptr;
+        s.value = p.active ? p.value : nullptr;
+        t = end;
+    }
+    return n;
+}
+
 }  // namespace oa3

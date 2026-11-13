@@ -98,4 +98,19 @@ bool price_at(const Event* events, size_t event_count, const DateTime& now,
 bool price_at(const Event* events, size_t event_count, int64_t now_unix,
               const char* payload_type, PriceAt* out);
 
+// One step of the schedule price_schedule() walks: span is clipped to the window, and value
+// is nullptr where no price is in force.
+struct PriceStep {
+    TimeInterval span;
+    const Event* event;
+    const Value* value;
+};
+
+// The prices in force across a bounded window, one step per span price_at() reports, in time
+// order, for drawing a forecast. Writes at most max steps and returns how many; *more (when
+// not null) is set when the window continues past the last one written. An indefinite or
+// inverted window gives 0.
+size_t price_schedule(const Event* events, size_t event_count, const TimeInterval& window,
+                      const char* payload_type, PriceStep* out, size_t max, bool* more);
+
 }  // namespace oa3
