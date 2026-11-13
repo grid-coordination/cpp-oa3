@@ -1,13 +1,16 @@
-// Polls one program's events on an OpenADR 3 VTN and prints the price in force.
+// Polls one program's events on an OpenADR 3 VTN, optionally follows its MQTT notifications,
+// and prints the price in force.
 #include <curl/curl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <oa3/client/ven_client.h>
 #include <oa3/posix/curl_transport.h>
+#include <oa3/posix/paho_mqtt_session.h>
 #include <oa3/posix/posix_clock.h>
 #include <oa3/posix/stderr_log.h>
 
@@ -23,14 +26,26 @@ const char kUsage[] =
     "  --poll SECONDS       poll period (default 900)\n"
     "  --horizon ISO8601    window parsed from now (default PT24H)\n"
     "  --cacert PATH        trusted CA bundle (default: the system store)\n"
-    "  --insecure           skip TLS peer and host verification\n"
+    "  --insecure           skip TLS peer and host verification (HTTPS and MQTTS)\n"
+    "  --notifications off|mqtt\n"
+    "                       follow the program's MQTT notifications (default off)\n"
+    "  --mqtt-client-id ID  MQTT client id (default oa3-ven-demo-<pid>)\n"
+    "  --mqtt-uri URI       broker URI, used instead of the VTN's /notifiers\n"
+    "  --mqtt-allow-plain   accept mqtt:// or tcp:// when no TLS URI is offered\n"
+    "  --mqtt-cacert PATH   trusted CA bundle for MQTTS (default: OpenSSL's default paths)\n"
+    "  --exclusive-tls      close MQTTS around each HTTPS request (as on the classic ESP32)\n"
+    "  --notify-poll SECONDS\n"
+    "                       poll period while subscribed (default 3600)\n"
     "  --verbose            log at debug level\n"
-    "  --once               exit 0 at the first price report, 1 at the first failure\n"
+    "  --once               exit 0 at the first price report (with mqtt: at the first\n"
+    "                       connected report after a price), 1 at the first failure\n"
     "  --help\n";
 
 volatile sig_atomic_t g_stop = 0;
 int g_exit = -1;
 bool g_once = false;
+bool g_mqtt = false;
+bool g_priced = false;
 
 void on_signal(int) { g_stop = 1; }
 
@@ -66,15 +81,32 @@ void on_price(void*, const oa3::PriceInfo& p) {
         printf("no price in force (next %s)\n", next);
     }
     fflush(stdout);
-    if (g_once && g_exit < 0) g_exit = 0;
+    g_priced = true;
+    if (g_once && !g_mqtt && g_exit < 0) g_exit = 0;
 }
 
 void on_status(void*, const oa3::VenStatusInfo& s) {
-    printf("status: %s (http %s %d, parse %s, failures %u, retry %u ms)\n", to_string(s.status),
+    printf("status: %s (http %s %d, parse %s, failures %u, retry %u ms)", to_string(s.status),
            to_string(s.http_result), s.http_status, to_string(s.parse_result),
            static_cast<unsigned>(s.consecutive_failures), static_cast<unsigned>(s.retry_in_ms));
+    if (g_mqtt) {
+        printf(" notify: %s (mqtt %s, failures %u, notifications %u)", to_string(s.notify),
+               to_string(s.mqtt_result), static_cast<unsigned>(s.mqtt_failures),
+               static_cast<unsigned>(s.notifications));
+    }
+    printf("\n");
     fflush(stdout);
     if (!g_once || g_exit >= 0) return;
+    if (g_mqtt) {
+        if (s.notify == oa3::NotifyState::kUnavailable || s.mqtt_failures > 0) {
+            g_exit = 1;
+            return;
+        }
+        if (s.notify == oa3::NotifyState::kConnected && g_priced) {
+            g_exit = 0;
+            return;
+        }
+    }
     switch (s.status) {
         case oa3::VenStatus::kProgramNotFound:
         case oa3::VenStatus::kTransportError:
@@ -88,7 +120,9 @@ void on_status(void*, const oa3::VenStatusInfo& s) {
 }
 
 oa3::StaticVenStorage<> storage;
+oa3::NotificationStorage notes;
 char body[256 * 1024];
+char mqtt_payload[8192];
 
 }  // namespace
 
@@ -104,6 +138,13 @@ int main(int argc, char** argv) {
     const char* cacert = nullptr;
     bool insecure = false;
     bool verbose = false;
+    oa3::NotificationMode notifications = oa3::NotificationMode::kOff;
+    const char* mqtt_client_id = nullptr;
+    const char* mqtt_uri = nullptr;
+    bool mqtt_allow_plain = false;
+    const char* mqtt_cacert = nullptr;
+    bool exclusive_tls = false;
+    unsigned long notify_poll_s = 0;
 
     for (int i = 1; i < argc; ++i) {
         const char* v;
@@ -122,6 +163,28 @@ int main(int argc, char** argv) {
             if (*end || poll_s == 0) usage_error("bad --poll ", v);
         } else if ((v = flag_value(argc, argv, &i, "--horizon"))) {
             if (!parse_duration(v, &horizon)) usage_error("bad --horizon ", v);
+        } else if ((v = flag_value(argc, argv, &i, "--notifications"))) {
+            if (strcmp(v, "off") == 0) {
+                notifications = oa3::NotificationMode::kOff;
+            } else if (strcmp(v, "mqtt") == 0) {
+                notifications = oa3::NotificationMode::kMqtt;
+            } else {
+                usage_error("bad --notifications ", v);
+            }
+        } else if ((v = flag_value(argc, argv, &i, "--mqtt-client-id"))) {
+            mqtt_client_id = v;
+        } else if ((v = flag_value(argc, argv, &i, "--mqtt-uri"))) {
+            mqtt_uri = v;
+        } else if (strcmp(argv[i], "--mqtt-allow-plain") == 0) {
+            mqtt_allow_plain = true;
+        } else if ((v = flag_value(argc, argv, &i, "--mqtt-cacert"))) {
+            mqtt_cacert = v;
+        } else if (strcmp(argv[i], "--exclusive-tls") == 0) {
+            exclusive_tls = true;
+        } else if ((v = flag_value(argc, argv, &i, "--notify-poll"))) {
+            char* end;
+            notify_poll_s = strtoul(v, &end, 10);
+            if (*end || notify_poll_s == 0) usage_error("bad --notify-poll ", v);
         } else if ((v = flag_value(argc, argv, &i, "--cacert"))) {
             cacert = v;
         } else if (strcmp(argv[i], "--insecure") == 0) {
@@ -149,7 +212,17 @@ int main(int argc, char** argv) {
     http.set_ca_file(cacert);
     http.set_insecure(insecure);
     oa3::posix::PosixClock clock;
-    oa3::VenClient client(http, clock, storage.storage());
+    oa3::posix::PahoMqttSession session(mqtt_payload, sizeof(mqtt_payload));
+    session.set_ca_file(mqtt_cacert);
+    oa3::VenStorage mem = storage.storage();
+    mem.notifications = &notes;
+    oa3::VenClient client(http, clock, mem, &session);
+    g_mqtt = notifications == oa3::NotificationMode::kMqtt;
+    char client_id[32];
+    if (!mqtt_client_id) {
+        snprintf(client_id, sizeof(client_id), "oa3-ven-demo-%ld", static_cast<long>(getpid()));
+        mqtt_client_id = client_id;
+    }
 
     oa3::VenConfig config{};
     config.base_url = base_url;
@@ -159,6 +232,13 @@ int main(int argc, char** argv) {
     config.target_count = target_count;
     config.poll_period_s = static_cast<uint32_t>(poll_s);
     config.horizon = horizon;
+    config.notifications = notifications;
+    config.mqtt_client_id = mqtt_client_id;
+    config.mqtt_uri = mqtt_uri;
+    config.mqtt_allow_plain = mqtt_allow_plain;
+    config.mqtt_verify = !insecure;
+    config.exclusive_tls = exclusive_tls;
+    if (notify_poll_s) config.notify_poll_period_s = static_cast<uint32_t>(notify_poll_s);
     config.on_price_change = on_price;
     config.on_status = on_status;
     config.log.fn = oa3::posix::stderr_log;

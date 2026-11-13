@@ -58,6 +58,17 @@ bool build_program_url(char* buffer, size_t size, const char* base_url, const ch
 bool build_events_url(char* buffer, size_t size, const char* base_url, const char* program_id,
                       const TargetList* targets, uint32_t skip, uint32_t limit);
 
+// base/notifiers
+bool build_notifiers_url(char* buffer, size_t size, const char* base_url);
+
+// base/notifiers/mqtt/topics/programs/<id>/events
+bool build_program_events_topics_url(char* buffer, size_t size, const char* base_url,
+                                     const char* program_id);
+
+// base/notifiers/mqtt/topics/programs/<id>
+bool build_program_topics_url(char* buffer, size_t size, const char* base_url,
+                              const char* program_id);
+
 // The spec's objectID: 1 to 128 of ALPHA DIGIT _ - (openadr3.yaml), so it needs no encoding.
 bool is_object_id(const char* s);
 

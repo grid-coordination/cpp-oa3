@@ -310,6 +310,109 @@ static void test_start_rejections() {
     TEST_ASSERT_EQUAL_size_t(0, http.requests);
 }
 
+static fakes::FakeMqttSession mqtt;
+static oa3::NotificationStorage notes;
+static oa3::VenClient mqtt_client(http, clk, fakes::with_notifications(storage.storage(), &notes),
+                                  &mqtt);
+
+static oa3::VenConfig mqtt_config() {
+    oa3::VenConfig c = config();
+    c.notifications = oa3::NotificationMode::kMqtt;
+    c.mqtt_client_id = "ven-1";
+    return c;
+}
+
+static void test_mqtt_start_rejections() {
+    mqtt.reset();
+    TEST_ASSERT_TRUE(mqtt_client.start(mqtt_config()));
+    TEST_ASSERT_FALSE(client.start(mqtt_config()));
+
+    oa3::StaticVenStorage<1> small;
+    oa3::VenClient bare(http, clk, small.storage(), &mqtt);
+    TEST_ASSERT_FALSE(bare.start(mqtt_config()));
+
+    oa3::VenConfig c = mqtt_config();
+    c.mqtt_client_id = nullptr;
+    TEST_ASSERT_FALSE(mqtt_client.start(c));
+    c.mqtt_client_id = "";
+    TEST_ASSERT_FALSE(mqtt_client.start(c));
+    char id[OA3_MQTT_CLIENT_ID_MAX + 2];
+    memset(id, 'v', sizeof(id) - 1);
+    id[sizeof(id) - 1] = '\0';
+    c.mqtt_client_id = id;
+    TEST_ASSERT_FALSE(mqtt_client.start(c));
+    id[OA3_MQTT_CLIENT_ID_MAX] = '\0';
+    TEST_ASSERT_TRUE(mqtt_client.start(c));
+
+    c = mqtt_config();
+    c.poll_period_s = 900;
+    c.notify_poll_period_s = 899;
+    TEST_ASSERT_FALSE(mqtt_client.start(c));
+    c.notify_poll_period_s = 900;
+    TEST_ASSERT_TRUE(mqtt_client.start(c));
+    c.notify_poll_period_s = 2000001;
+    TEST_ASSERT_FALSE(mqtt_client.start(c));
+    c.notify_poll_period_s = 1000000;
+    c.stale_after_polls = 3;
+    TEST_ASSERT_FALSE(mqtt_client.start(c));
+    c.stale_after_polls = 0;
+    TEST_ASSERT_TRUE(mqtt_client.start(c));
+
+    c = mqtt_config();
+    c.mqtt_uri = "mqtts://b:8883";
+    TEST_ASSERT_TRUE(mqtt_client.start(c));
+    c.mqtt_uri = "mqtt://b:1883";
+    TEST_ASSERT_FALSE(mqtt_client.start(c));
+    c.mqtt_allow_plain = true;
+    TEST_ASSERT_TRUE(mqtt_client.start(c));
+    c.mqtt_uri = "mqtts://b:99999";
+    TEST_ASSERT_FALSE(mqtt_client.start(c));
+    c.mqtt_uri = "mqtts://";
+    TEST_ASSERT_FALSE(mqtt_client.start(c));
+    mqtt_client.stop();
+}
+
+static void test_mqtt_start_disconnects() {
+    mqtt.reset();
+    bool sp = false;
+    oa3::MqttConnectOptions o;
+    o.host = "b";
+    o.client_id = "x";
+    mqtt.connect(o, &sp);
+    TEST_ASSERT_TRUE(mqtt.connected());
+    TEST_ASSERT_TRUE(mqtt_client.start(mqtt_config()));
+    TEST_ASSERT_FALSE(mqtt.connected());
+    TEST_ASSERT_EQUAL_size_t(0, mqtt_client.subscription_count());
+    TEST_ASSERT_EQUAL_STRING("OFF", oa3::to_string(mqtt_client.status().notify));
+    mqtt_client.stop();
+}
+
+static void test_mqtt_copies_client_id_and_uri() {
+    mqtt.reset();
+    char id[] = "ven-1";
+    char uri[] = "mqtts://override:8884";
+    oa3::VenConfig c = mqtt_config();
+    c.program_id = kProgramId;
+    c.mqtt_client_id = id;
+    c.mqtt_uri = uri;
+    c.program_name = nullptr;
+    TEST_ASSERT_TRUE(mqtt_client.start(c));
+    id[0] = 'X';
+    uri[8] = 'X';
+    http.push_ok(fakes::kProgramBody);
+    http.push_ok(events_fixture);
+    http.push_ok(fakes::kEventTopicsBody);
+    http.push_ok(fakes::kProgramTopicsBody);
+    for (int i = 0; i < 5; ++i) {
+        mqtt_client.loop();
+    }
+    TEST_ASSERT_EQUAL_size_t(1, mqtt.connects);
+    TEST_ASSERT_EQUAL_STRING("ven-1", mqtt.last_client_id);
+    TEST_ASSERT_EQUAL_STRING("override", mqtt.last_host);
+    TEST_ASSERT_EQUAL_UINT16(8884, mqtt.last.port);
+    mqtt_client.stop();
+}
+
 static void test_start_copies_strings() {
     char name[32];
     char base[80];
@@ -468,6 +571,9 @@ int main() {
     RUN_TEST(test_fire_on_change_only);
     RUN_TEST(test_fire_on_every_failure);
     RUN_TEST(test_start_rejections);
+    RUN_TEST(test_mqtt_start_rejections);
+    RUN_TEST(test_mqtt_start_disconnects);
+    RUN_TEST(test_mqtt_copies_client_id_and_uri);
     RUN_TEST(test_start_copies_strings);
     RUN_TEST(test_start_clears_data);
     RUN_TEST(test_stop_silences);

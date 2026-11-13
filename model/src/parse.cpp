@@ -854,16 +854,17 @@ ParseResult check_object_type(JsonObjectConst o, const char* inherited, const ch
     return ParseResult::kOk;
 }
 
+// A DELETE notification's object may carry its id alone, so only the id is required then.
 ParseResult copy_event(JsonVariantConst v, Event* out, const ParseOptions* opt,
-                       const char* inherited_type) {
+                       const char* inherited_type, bool deletion = false) {
     if (!v.is<JsonObjectConst>()) {
         return ParseResult::kInvalidField;
     }
     JsonObjectConst o = v.as<JsonObjectConst>();
     OA3_TRY(check_object_type(o, inherited_type, "EVENT"));
-    OA3_TRY(copy_string(o["id"], out->id, sizeof(out->id), false));
+    OA3_TRY(copy_string(o["id"], out->id, sizeof(out->id), deletion));
     OA3_TRY(copy_string(get(o, "programID", "program_id"), out->program_id,
-                        sizeof(out->program_id), true));
+                        sizeof(out->program_id), !deletion));
     OA3_TRY(copy_truncated(get(o, "eventName", "event_name"), out->event_name,
                            sizeof(out->event_name)));
     OA3_TRY(copy_datetime(get(o, "modificationDateTime", "modification_date_time"),
@@ -911,7 +912,7 @@ bool attributes_say_local(JsonVariantConst v) {
 }
 
 ParseResult copy_program(JsonVariantConst v, Program* out, const ParseOptions* opt,
-                         const char* inherited_type) {
+                         const char* inherited_type, bool deletion = false) {
     if (!v.is<JsonObjectConst>()) {
         return ParseResult::kInvalidField;
     }
@@ -919,7 +920,7 @@ ParseResult copy_program(JsonVariantConst v, Program* out, const ParseOptions* o
     OA3_TRY(check_object_type(o, inherited_type, "PROGRAM"));
     OA3_TRY(copy_string(o["id"], out->id, sizeof(out->id), true));
     OA3_TRY(copy_string(get(o, "programName", "program_name"), out->program_name,
-                        sizeof(out->program_name), true));
+                        sizeof(out->program_name), !deletion));
     OA3_TRY(copy_datetime(get(o, "modificationDateTime", "modification_date_time"),
                           &out->has_modification_date_time, &out->modification_date_time));
     JsonVariantConst local_price = get(o, "localPrice", "local_price");
@@ -944,11 +945,12 @@ ParseResult copy_notification(JsonVariantConst v, Notification* out, const Parse
     out->object_type = parse_object_type(type.as<const char*>());
     out->operation = parse_operation(op.as<const char*>());
     OA3_TRY(copy_targets(o["targets"], &out->targets));
+    const bool deletion = out->operation == Operation::kDelete;
     if (out->object_type == ObjectType::kProgram) {
-        OA3_TRY(copy_program(object, &out->program, opt, type.as<const char*>()));
+        OA3_TRY(copy_program(object, &out->program, opt, type.as<const char*>(), deletion));
         out->has_object = true;
     } else if (out->object_type == ObjectType::kEvent) {
-        OA3_TRY(copy_event(object, &out->event, opt, type.as<const char*>()));
+        OA3_TRY(copy_event(object, &out->event, opt, type.as<const char*>(), deletion));
         out->has_object = true;
     }
     return ParseResult::kOk;

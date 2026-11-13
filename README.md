@@ -6,7 +6,7 @@ The library is the core only. A port supplies HTTP, MQTT, mDNS and the clock; th
 
 ## Status
 
-Pre-release. `oa3_model` (time, entities, streaming parse, intervals and prices) and `oa3_client` (`VenClient`, a polling VEN) are in place, with a POSIX port. The ESP32 port is in progress in esp32-firmware; [`doc/porting.md`](doc/porting.md) describes what a port supplies.
+Pre-release. `oa3_model` (time, entities, streaming parse, intervals and prices) and `oa3_client` (`VenClient`, a VEN that polls and can follow MQTT notifications) are in place, with a POSIX port. The ESP32 port is in progress in esp32-firmware; [`doc/porting.md`](doc/porting.md) describes what a port supplies.
 
 ## Building on a host
 
@@ -28,15 +28,16 @@ pio run -d ci/esp32
 
 ## POSIX demo
 
-`ports/posix` builds the library with a libcurl transport and `oa3-ven-demo`, which polls one program on a VTN and prints the price in force. It needs libcurl ([`ports/posix/README.md`](ports/posix/README.md)).
+`ports/posix` builds the library with a libcurl transport, a Paho MQTT C session and `oa3-ven-demo`, which follows one program on a VTN and prints the price in force. It needs libcurl and OpenSSL (on macOS, Homebrew `openssl@3`); CMake fetches Paho MQTT C ([`ports/posix/README.md`](ports/posix/README.md)).
 
 ```bash
 cmake -S ports/posix -B build-posix
 cmake --build build-posix -j
 build-posix/oa3-ven-demo --program EELEC-012041131 --poll 60 --verbose
+build-posix/oa3-ven-demo --program EELEC-012041131 --notifications mqtt --verbose
 ```
 
-The default VTN is the price server, `https://price.grid-coordination.energy/openadr3/3.1.0`. Each price change prints a line such as `2026-11-13T02:00:00Z..2026-11-13T03:00:00Z  0.108155 USD/KWH  next 2026-11-13T03:00:00Z`; status changes print on stdout and the library's log on stderr. Ctrl-C stops it.
+The default VTN is the price server, `https://price.grid-coordination.energy/openadr3/3.1.0`; with `--notifications mqtt` the demo also subscribes to the program's notifications on the broker the VTN advertises. Each price change prints a line such as `2026-11-13T02:00:00Z..2026-11-13T03:00:00Z  0.108155 USD/KWH  next 2026-11-13T03:00:00Z`; status changes print on stdout and the library's log on stderr. Ctrl-C stops it.
 
 ## Related projects
 

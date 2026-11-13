@@ -1,10 +1,11 @@
 # Porting oa3_client
 
-A port gives `VenClient` an HTTP(S) transport, a clock, a log sink and its storage, and calls `loop()` from one task. Everything else (URLs, paging, parsing, backoff, price evaluation) is in the core. `ports/posix` is the reference port; this document adds what an ESP32 port on arduino-esp32 3.x needs.
+A port gives `VenClient` an HTTP(S) transport, a clock, a log sink, its storage and, for MQTT notifications, an MQTT session, and calls `loop()` from one task. Everything else (URLs, paging, parsing, backoff, price evaluation) is in the core. `ports/posix` is the reference port; this document adds what an ESP32 port on arduino-esp32 3.x needs.
 
 | Piece | Interface | Header |
 |---|---|---|
 | HTTP(S) | `oa3::HttpTransport` | `oa3/client/http_transport.h` |
+| MQTT(S), optional | `oa3::MqttSession` | `oa3/client/mqtt_session.h` |
 | Wall and monotonic time | `oa3::Clock` | `oa3/client/clock.h` |
 | Log | `oa3::LogSink` (`LogFn` + `void* ctx` + `max_level`) | `oa3/client/log.h` |
 | Event arrays and JSON arena | `oa3::VenStorage` | `oa3/client/ven_client.h` |
@@ -78,6 +79,51 @@ private:
 };
 ```
 
+## MqttSession
+
+An MQTT 3.1.1 client the port passes to the `VenClient` constructor; it is needed only with `VenConfig::notifications = NotificationMode::kMqtt`. The client drives it from the task that runs `loop()`, so it needs no thread of its own, and holds one session at a time. Every call blocks at most its timeout. The contract:
+
+- `connect(options, &session_present)` opens a session, ending any open one first. `options` is borrowed for the call: host, port and `tls` from the broker URI, `client_id` from `VenConfig::mqtt_client_id`, no username or password (the client supports ANONYMOUS brokers only), `verify` and `ca_pem` from `mqtt_verify` and `mqtt_ca_pem` (`nullptr`: the port's default roots), `keepalive_s`, `clean_session`, and `timeout_ms` for DNS, TCP, TLS and CONNACK together. On `kOk`, `*session_present` is the CONNACK flag.
+- Resolve the broker host under the board's DNS lock (see "Name resolution" below) before connecting, and return `kDnsFailed` if that fails. The connect runs on the client's task, inside `loop()`.
+- Map other failures onto `MqttResult`: `kConnectFailed`, `kTlsFailed`, `kTlsVerifyFailed` (the certificate or host name did not verify), `kRefused` for CONNACK 1-3, `kNotAuthorized` for 4-5, `kTimeout`, `kNetworkDown` when the port knows it has no network, else `kIoError`.
+- `disconnect()` may be called at any time, connected or not. It sends DISCONNECT when connected, closes the connection and frees everything a previous `connect()` allocated, the TLS session included, before it returns, also after a failed `connect()` or a lost session. The broker keeps a session opened with `clean_session` false.
+- `subscribe(filter, qos, timeout_ms)` and `unsubscribe(filter, timeout_ms)` return when the SUBACK or UNSUBACK arrives; a SUBACK of 0x80 is `kSubscribeFailed`. The client subscribes at QoS 1.
+- `poll(max_wait_ms, on_message, ctx)` delivers every message already received, waiting up to `max_wait_ms` for the first (the client passes 0), and sends PINGREQ when keepalive requires it. Acknowledge each QoS 1 message after `on_message` returns. Return `kConnectionLost` when the session ended, before or during the call, after delivering what arrived before the loss.
+- `MqttMessage` is valid only during `on_message`. Set `retained` from the PUBLISH when the library reports it. When a payload exceeds the port's buffer, deliver it with `payload` `nullptr`, `too_large` true and `len` the size on the wire when known; the client then fetches `/events`, unless the message is retained. A price-server notification is about 3.5 KB; 8 KB is a comfortable buffer.
+- `connected()` is the port's view of the session; the client treats false as a loss.
+
+The client calls `poll(0)` at the start of each `loop()` while subscribed, and `ms_until_due()` is then at most `VenConfig::mqtt_poll_ms` (100 by default), so a port that sleeps for `ms_until_due()` picks messages up promptly and keeps the session alive.
+
+A broker sends its retained messages on every new subscription, which can be after the client's `/events` snapshot. The client applies a retained CREATE or UPDATE only as an update of a stored event with a newer `modificationDateTime`, and drops a CREATE or UPDATE of an event the snapshot lacks when its `modificationDateTime` is before the snapshot, which covers a port that cannot report `retained`.
+
+### arduino-esp32 3.x: arduino-mqtt
+
+Use 256dpi's arduino-mqtt (`MQTTClient`, 2.5.2 in esp32-firmware), which runs in the caller's task through `loop()`. ESP-IDF's esp-mqtt runs a task of its own, which the contract does not allow. Keep one `NetworkClientSecure net` and one `MQTTClient mqtt(8192, 512)` as members of the port: the constructor allocates the read and write buffers once, and the read buffer must hold the largest notification plus its topic and header.
+
+| Contract | arduino-mqtt |
+|---|---|
+| `connect` | `net.setCACert(ca_pem)` (or the port's default root), `net.setHandshakeTimeout(seconds)`, `mqtt.begin(host, port, net)`, `mqtt.setKeepAlive(keepalive_s)`, `mqtt.setCleanSession(clean_session)`, `mqtt.setTimeout(timeout_ms)`, then `mqtt.connect(client_id)`. On false, `mqtt.returnCode()` 1-3 is `kRefused` and 4-5 `kNotAuthorized`; `mqtt.lastError()` `LWMQTT_NETWORK_FAILED_CONNECT` is `kTlsFailed` when `net.lastError(buf, len)` is below -1, else `kConnectFailed`; `LWMQTT_NETWORK_TIMEOUT` is `kTimeout`. On true, `*session_present = mqtt.sessionPresent()`. |
+| `disconnect` | `mqtt.disconnect()`, then `net.stop()` always: `MQTTClient::disconnect()` returns early when it is no longer connected, and only `stop()` frees the TLS session. |
+| `subscribe` | `mqtt.subscribe(filter, 1)`; on false, `LWMQTT_FAILED_SUBSCRIPTION` is `kSubscribeFailed`. A failed subscribe closes the connection. |
+| `unsubscribe` | `mqtt.unsubscribe(filter)` |
+| `poll` | Set `mqtt.ref = this` and `mqtt.onMessageAdvanced(cb)` once; `cb(client, topic, bytes, length)` forwards to the `on_message` and `ctx` stored for the current `poll()`. Call `mqtt.loop()` once; it calls `cb` before it sends the PUBACK. Return `kConnectionLost` when `loop()` returns false or `mqtt.connected()` is false. |
+| `connected` | `mqtt.connected()` |
+
+Two limits of this library:
+
+- Its callback has no retained flag, so the port reports `retained` false and relies on the client's `modificationDateTime` check above.
+- It cannot deliver an oversized message as `too_large`. By default a PUBLISH larger than the read buffer fails with `LWMQTT_BUFFER_TOO_SHORT` and `loop()` closes the connection; with `dropOverflow(true)` the packet is drained without its topic and without a PUBACK, and only `droppedMessages()` counts it. Either way the broker redelivers the unacknowledged QoS 1 message to the kept session on every resume, so size the read buffer so that no notification can exceed it.
+
+### One TLS session at a time
+
+On the classic ESP32 a TLS session costs 42-45 KB of internal RAM and a second one does not fit, so an MQTTS session and an HTTPS request cannot be open together. Set `VenConfig::exclusive_tls`: the client then
+
+- fetches `/events` before connecting, and connects with `clean_session` false, so the broker queues QoS 1 notifications while the session is closed;
+- calls `disconnect()` before every HTTPS request while a session may hold TLS, the hourly fallback poll included, and after a failed connect or subscribe, and resumes at the first `loop()` with no request due, so all pages of one fetch run before it reconnects;
+- subscribes again on a resume that finds no session, without another fetch, and polls `/events` every `poll_period_s` instead of `notify_poll_period_s` until a resume finds the session kept. A first connect has no session, so the first fallback poll after it comes at `poll_period_s`.
+
+The rule for the port: `disconnect()` must free the TLS session whatever state the connection is in, because the client's next call may be an HTTPS `get()`. `exclusive_tls` has no effect with a plain `mqtt://` broker. Leave it off on a target that fits two TLS sessions.
+
 ## Clock
 
 `now(DateTime* out)` returns the UTC instant, or false while the wall clock is unset; the client reports `WAITING_FOR_CLOCK` and makes no request until it is true, because every fetch window starts at `now`. On the ESP32, return false until SNTP has synchronized (`esp_sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED` once, or `time()` past a floor such as 2020-01-01, as `PosixClock` does), then fill `out` with `oa3::from_unix(tv.tv_sec, tv.tv_usec * 1000, out)` from `gettimeofday()`. Times are UTC throughout; the library has no zone handling.
@@ -90,7 +136,9 @@ private:
 
 ## Storage
 
-`VenStorage` is the client's working memory: two `Event` arrays (`events` and `scratch`, `capacity` elements each; a fetch fills `scratch` and swaps on success, so a failure keeps the last good events) and the `JsonArena` the parser uses for one top-level object at a time. An `Event` is about 5.4 KB with the default capacities, so `OA3_MAX_EVENTS=2` costs about 21.6 KB in arrays plus the arena (16 KB by default on a 32-bit target). `StaticVenStorage<>` puts all of it in `.bss`; on the `ci/esp32` build with `OA3_MAX_EVENTS=2` it is 38,016 bytes.
+`VenStorage` is the client's working memory: two `Event` arrays (`events` and `scratch`, `capacity` elements each; a fetch fills `scratch` and swaps on success, so a failure keeps the last good events) and the `JsonArena` the parser uses for one top-level object at a time. An `Event` is about 5.4 KB with the default capacities, so `OA3_MAX_EVENTS=2` costs about 21.6 KB in arrays plus the arena (16 KB by default on a 32-bit target). `StaticVenStorage<>` puts all of it in `.bss`; on the `ci/esp32` build with `OA3_MAX_EVENTS=2` it is 37,984 bytes.
+
+MQTT notifications also need a `NotificationStorage` in `VenStorage::notifications`: the `Notification` a message is parsed into (an `Event` and a `Program`), the `/notifiers` and topics responses and the topic lists, 10,088 bytes on the `ci/esp32` build. A client with notifications off needs none of it.
 
 On a board with PSRAM, allocate it there once at init and never free it:
 
@@ -105,10 +153,12 @@ oa3::Event* events = static_cast<oa3::Event*>(mem);
 for (size_t i = 0; i < 2 * n; ++i) new (&events[i]) oa3::Event();
 void* arena_buf = heap_caps_malloc(arena_size, MALLOC_CAP_SPIRAM);
 static oa3::JsonArena arena(arena_buf, arena_size);
-const oa3::VenStorage storage{events, events + n, n, &arena};
+void* notes_mem = heap_caps_aligned_alloc(alignof(oa3::NotificationStorage), sizeof(oa3::NotificationStorage), MALLOC_CAP_SPIRAM);
+auto* notes = new (notes_mem) oa3::NotificationStorage();
+const oa3::VenStorage storage{events, events + n, n, &arena, notes};
 ```
 
-Without PSRAM, use `StaticVenStorage<>` and leave the internal heap to the TLS session. After a fetch, `arena.high_water()` shows how much of the arena one event needed; shrink `OA3_JSON_ARENA_SIZE` toward it, with margin, if RAM is short.
+Without notifications, leave the last member out. Without PSRAM, use `StaticVenStorage<>` (and a static `NotificationStorage`) and leave the internal heap to the TLS session. After a fetch, `arena.high_water()` shows how much of the arena one event needed; shrink `OA3_JSON_ARENA_SIZE` toward it, with margin, if RAM is short.
 
 ## Sizing for 24 h
 
@@ -130,11 +180,11 @@ Run the client on a FreeRTOS task of its own with at least 6 KB of stack; 8 KB i
 
 `VenClient` is not thread-safe, and every callback runs inside `loop()` on this task. Another task asks for an early fetch by sending a message the OA3 task turns into `request_poll()`; the price goes out by copying `PriceInfo` into a queue from `on_price_change`. A `loop()` that makes a request blocks for up to `http_timeout_ms`; otherwise it returns at once. Sleep for `ms_until_due()`, capped so that queued messages are seen.
 
-On the classic ESP32, nothing else may hold a TLS session while the client fetches: close MQTTS before the request, or schedule it between requests.
+On the classic ESP32, nothing else may hold a TLS session while the client fetches. The client's own MQTTS session follows this rule with `VenConfig::exclusive_tls`; anything else that holds one must close it before the request, or be scheduled between requests.
 
 ### Name resolution
 
-`HTTPClient::GET()` resolves the host from inside `connect()`, on the client's task. In arduino-esp32 3.3.11 the first `Network.hostByName()` after an address change clears the DNS cache without the lwIP core lock, and asserts ("Required to lock TCPIP core functionality!") if another lookup is pending, for example SNTP's or another task's MQTT or OTA connect. Serialize every name lookup on the board behind one lock, wait for pending SNTP lookups, and resolve the VTN host under that lock before `GET()`. esp32-firmware does this with `network_dns_prime(host)`.
+`HTTPClient::GET()` resolves the host from inside `connect()`, on the client's task. In arduino-esp32 3.3.11 the first `Network.hostByName()` after an address change clears the DNS cache without the lwIP core lock, and asserts ("Required to lock TCPIP core functionality!") if another lookup is pending, for example SNTP's or another task's MQTT or OTA connect. Serialize every name lookup on the board behind one lock, wait for pending SNTP lookups, and resolve the VTN host under that lock before `GET()`. esp32-firmware does this with `network_dns_prime(host)`. The same applies to the broker host: `MQTTClient::connect()` resolves it inside `NetworkClientSecure::connect()` on the client's task, so resolve it under the lock before `mqtt.connect()`.
 
 ## Minimal wiring
 
@@ -176,4 +226,4 @@ void setup() {
 }
 ```
 
-`start()` copies the configuration's strings and returns false for an invalid one: no base URL or program, a URL that cannot fit `OA3_URL_MAX` with the longest id and targets, a `program_id` that is not a spec objectID, a poll or backoff period above 2,000,000 s, or `stale_after_polls * poll_period_s` at or above 2^31 ms (with the default `stale_after_polls` of 3, a poll period above 715,827 s). A port that takes these from user input should refuse names and ids its own buffers would truncate, since `start()` cannot tell a truncated value from a real one.
+`start()` copies the configuration's strings and returns false for an invalid one: no base URL or program, a URL that cannot fit `OA3_URL_MAX` with the longest id and targets, a `program_id` that is not a spec objectID, a poll or backoff period above 2,000,000 s, or `stale_after_polls * poll_period_s` at or above 2^31 ms (with the default `stale_after_polls` of 3, a poll period above 715,827 s). With MQTT notifications it also requires an `MqttSession`, `VenStorage::notifications` and a `mqtt_client_id` of 1 to `OA3_MQTT_CLIENT_ID_MAX` (63) characters, `poll_period_s <= notify_poll_period_s <= 2,000,000`, `stale_after_polls * notify_poll_period_s` below 2^31 ms, and an `mqtt_uri`, when given, that parses and is `mqtts://` or `ssl://` unless `mqtt_allow_plain`. A port that takes these from user input should refuse names and ids its own buffers would truncate, since `start()` cannot tell a truncated value from a real one.

@@ -67,9 +67,10 @@ jobs:
       - name: Build
         run: pio run -d ci/esp32
 
-  # The POSIX port (ports/posix): the client over libcurl, its demo program, and tests
-  # against an HTTP server each test starts on a loopback port. The live price-server test
-  # (-DOA3_POSIX_LIVE_TESTS=ON) is not run here.
+  # The POSIX port (ports/posix): the client over libcurl and Paho MQTT C (fetched, with
+  # OpenSSL), its demo program, and tests against an HTTP server and a mosquitto broker each
+  # test starts on a loopback port. The live price-server tests (-DOA3_POSIX_LIVE_TESTS=ON)
+  # are not run here.
   posix-port:
     name: POSIX port (${{ matrix.cc }})
     runs-on: ubuntu-latest
@@ -84,8 +85,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install libcurl
-        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - name: Install libcurl, OpenSSL and mosquitto
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libssl-dev mosquitto
 
       - name: Configure
         run: >

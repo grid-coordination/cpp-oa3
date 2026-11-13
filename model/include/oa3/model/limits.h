@@ -64,6 +64,31 @@
 #define OA3_MAX_VALUES 25
 #endif
 
+// /notifiers: broker URIs kept from the MQTT binding, and the length of each.
+#ifndef OA3_NOTIFIER_URIS_MAX
+#define OA3_NOTIFIER_URIS_MAX 4
+#endif
+
+#ifndef OA3_NOTIFIER_URI_MAX
+#define OA3_NOTIFIER_URI_MAX 191
+#endif
+
+// A broker host name from a URI.
+#ifndef OA3_HOST_MAX
+#define OA3_HOST_MAX 127
+#endif
+
+// The MQTT binding's OAUTH2_BEARER_TOKEN username: "{clientID}" or a literal.
+#ifndef OA3_MQTT_USERNAME_MAX
+#define OA3_MQTT_USERNAME_MAX 63
+#endif
+
+// One topic name from a /notifiers/mqtt/topics response. Price-server event topics are 73
+// characters: OpenADR/3.1.0/programs/<36-character id>/events/update.
+#ifndef OA3_TOPIC_MAX
+#define OA3_TOPIC_MAX 191
+#endif
+
 // Defaults for caller-owned arrays; the model takes a pointer and a capacity.
 //
 // Sizing for a window (ParseOptions::window): parse_events keeps only events that overlap the
