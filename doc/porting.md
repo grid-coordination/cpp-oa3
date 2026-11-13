@@ -15,7 +15,7 @@ A port gives `VenClient` an HTTP(S) transport, a clock, a log sink and its stora
 `get(request, on_response, ctx)` performs one GET and returns once the connection is closed. The contract:
 
 - One request at a time, and no connection outlives `get()`. On the classic ESP32 a TLS session costs 42-45 KB of internal RAM and a second one does not fit, so the port opens a connection per request and closes it before returning. The client makes at most one request per `loop()` and pages `/programs` and `/events` over successive calls, so it never asks for a second connection while one is open.
-- `request.url` is absolute and already percent-encoded, at most `OA3_URL_MAX` (511) characters. Send every entry of `request.headers` (today `Accept: application/json`; a bearer token will arrive the same way). `request.timeout_ms` bounds the whole request (default 15,000 from `VenConfig::http_timeout_ms`); 0 leaves it to the transport.
+- `request.url` is absolute and already percent-encoded, at most `OA3_URL_MAX` (511) characters. Send every entry of `request.headers` (today `Accept: application/json`; a bearer token will arrive the same way). `request.timeout_ms` bounds the whole request, name resolution included (default 15,000 from `VenConfig::http_timeout_ms`); 0 leaves it to the transport. Library timeouts usually budget each phase separately, so take one deadline at the start of `get()` and give each phase (DNS, connect, handshake, headers, body) what is left of it.
 - Once a status line arrives, call `on_response(ctx, status, body)` exactly once, for any status, before `get()` returns. `body` is an `oa3::ByteReader` over the response body with any chunked encoding removed; `read()` returns -1 at its end. The handler may stop reading early; the transport then discards the rest by closing the connection. `body` is valid only during the call.
 - Return `kOk` when the handler ran and the body was delivered in full or abandoned by the handler. Otherwise return the failure: `kInvalidUrl`, `kDnsFailed`, `kConnectFailed`, `kTlsFailed`, `kTimeout`, `kTooLarge` or `kIoError` (anything else, including a body cut short). After a failure the client discards whatever the handler parsed, so a transport may call the handler and still fail, for example when the deadline passes mid-body.
 - `post()` has a default that returns `kUnsupported`. Leave it alone: the client sends no POST until VTN authentication (token and `/vens`) is added in a later release.
@@ -28,7 +28,7 @@ Keep one `NetworkClientSecure` and one `HTTPClient` as members of the transport,
 
 1. `secure.setCACert(pem)` once at init, with the PEM of the VTN's root (for the price server, the Amazon RSA 2048 chain's root; esp32-firmware stores it at `/certs/priceGrid-coordinationEnergy.ca`). `setInsecure()` only behind an explicit opt-in. `secure.setHandshakeTimeout(seconds)` takes seconds.
 2. `http.begin(secure, url)`; `http.useHTTP10(true)`, which also turns off keep-alive in this version (`_reuse = !useHTTP10`) and keeps the server from sending a chunked body that `getStream()` would deliver raw; `http.setConnectTimeout(ms)`; `http.setTimeout(ms)` (a `uint16_t`, so at most 65,535 ms, applied per read); `http.addHeader(name, value)` for each request header.
-3. `int code = http.GET()`. A negative code is a failure: `HTTPC_ERROR_CONNECTION_REFUSED` (-1) covers DNS, TCP and TLS failures alike (`connect()` returning false), so call `secure.lastError(buf, len)`: it returns the mbedTLS error and fills `buf` with its text after a failed handshake. Log the text, and return `kTlsFailed` when it reports an error, `kConnectFailed` otherwise. Map `HTTPC_ERROR_READ_TIMEOUT` (-11) to `kTimeout` and any other negative code to `kIoError`.
+3. Resolve the host yourself before `GET()` (see "Name resolution" below) and return `kDnsFailed` if that fails. Then `int code = http.GET()`. A negative code is a failure: `HTTPC_ERROR_CONNECTION_REFUSED` (-1) covers TCP and TLS failures alike (`connect()` returning false). `secure.lastError(buf, len)` tells them apart only partly: in arduino-esp32 3.3.11 it is -1 for a TCP connect error, a select timeout or a handshake timeout, and a real mbedTLS code (below -1) for a TLS failure, so return `kTlsFailed` when it is below -1 and log its text, else `kConnectFailed`. It keeps its old value across a DNS failure, which is another reason to resolve first. Map `HTTPC_ERROR_READ_TIMEOUT` (-11) to `kTimeout` and any other negative code to `kIoError`.
 4. For a positive code, wrap `http.getStream()` in a `ByteReader` and call `on_response(ctx, code, reader)`. The price server sends no Content-Length under HTTP/1.0, so the body ends when the server closes the connection; when `http.getSize()` is not -1, stop after that many bytes.
 5. `http.end()`, which closes the connection and frees the TLS session, on every path. Return `kTimeout` if the reader hit the deadline, `kIoError` if the connection closed with Content-Length bytes still owed, else `kOk`.
 
@@ -58,11 +58,12 @@ public:
             } else if (!_s.connected()) {
                 cut_short = _left > 0;
                 break;
-            } else if (static_cast<int32_t>(millis() - _deadline) >= 0) {
-                timed_out = true;
-                break;
             } else {
                 delay(1);
+            }
+            if (static_cast<int32_t>(millis() - _deadline) >= 0) {
+                timed_out = true;
+                break;
             }
         }
         return n;
@@ -131,6 +132,10 @@ Run the client on a FreeRTOS task of its own with at least 6 KB of stack; 8 KB i
 
 On the classic ESP32, nothing else may hold a TLS session while the client fetches: close MQTTS before the request, or schedule it between requests.
 
+### Name resolution
+
+`HTTPClient::GET()` resolves the host from inside `connect()`, on the client's task. In arduino-esp32 3.3.11 the first `Network.hostByName()` after an address change clears the DNS cache without the lwIP core lock, and asserts ("Required to lock TCPIP core functionality!") if another lookup is pending, for example SNTP's or another task's MQTT or OTA connect. Serialize every name lookup on the board behind one lock, wait for pending SNTP lookups, and resolve the VTN host under that lock before `GET()`. esp32-firmware does this with `network_dns_prime(host)`.
+
 ## Minimal wiring
 
 ```cpp
@@ -171,4 +176,4 @@ void setup() {
 }
 ```
 
-`start()` copies the configuration's strings and returns false for an invalid one: no base URL or program, a URL that cannot fit `OA3_URL_MAX` with the longest id and targets, a `program_id` that is not a spec objectID, a poll or backoff period above 2,000,000 s, or `stale_after_polls * poll_period_s` at or above 2^31 ms.
+`start()` copies the configuration's strings and returns false for an invalid one: no base URL or program, a URL that cannot fit `OA3_URL_MAX` with the longest id and targets, a `program_id` that is not a spec objectID, a poll or backoff period above 2,000,000 s, or `stale_after_polls * poll_period_s` at or above 2^31 ms (with the default `stale_after_polls` of 3, a poll period above 715,827 s). A port that takes these from user input should refuse names and ids its own buffers would truncate, since `start()` cannot tell a truncated value from a real one.
