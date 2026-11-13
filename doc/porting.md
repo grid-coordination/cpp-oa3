@@ -28,9 +28,9 @@ Keep one `NetworkClientSecure` and one `HTTPClient` as members of the transport,
 
 1. `secure.setCACert(pem)` once at init, with the PEM of the VTN's root (for the price server, the Amazon RSA 2048 chain's root; esp32-firmware stores it at `/certs/priceGrid-coordinationEnergy.ca`). `setInsecure()` only behind an explicit opt-in. `secure.setHandshakeTimeout(seconds)` takes seconds.
 2. `http.begin(secure, url)`; `http.useHTTP10(true)`, which also turns off keep-alive in this version (`_reuse = !useHTTP10`) and keeps the server from sending a chunked body that `getStream()` would deliver raw; `http.setConnectTimeout(ms)`; `http.setTimeout(ms)` (a `uint16_t`, so at most 65,535 ms, applied per read); `http.addHeader(name, value)` for each request header.
-3. `int code = http.GET()`. A negative code is a failure: `HTTPC_ERROR_CONNECTION_REFUSED` (-1) covers DNS, TCP and TLS failures alike (`connect()` returning false), so map it to `kConnectFailed`; `HTTPC_ERROR_READ_TIMEOUT` (-11) to `kTimeout`; any other to `kIoError`.
+3. `int code = http.GET()`. A negative code is a failure: `HTTPC_ERROR_CONNECTION_REFUSED` (-1) covers DNS, TCP and TLS failures alike (`connect()` returning false), so call `secure.lastError(buf, len)`: it returns the mbedTLS error and fills `buf` with its text after a failed handshake. Log the text, and return `kTlsFailed` when it reports an error, `kConnectFailed` otherwise. Map `HTTPC_ERROR_READ_TIMEOUT` (-11) to `kTimeout` and any other negative code to `kIoError`.
 4. For a positive code, wrap `http.getStream()` in a `ByteReader` and call `on_response(ctx, code, reader)`. The price server sends no Content-Length under HTTP/1.0, so the body ends when the server closes the connection; when `http.getSize()` is not -1, stop after that many bytes.
-5. `http.end()`, which closes the connection and frees the TLS session, on every path. Return `kTimeout` if the reader hit the deadline, else `kOk`.
+5. `http.end()`, which closes the connection and frees the TLS session, on every path. Return `kTimeout` if the reader hit the deadline, `kIoError` if the connection closed with Content-Length bytes still owed, else `kOk`.
 
 A reader for step 4, with the deadline taken from `request.timeout_ms`:
 
@@ -56,6 +56,7 @@ public:
                     if (_left > 0) _left -= got;
                 }
             } else if (!_s.connected()) {
+                cut_short = _left > 0;
                 break;
             } else if (static_cast<int32_t>(millis() - _deadline) >= 0) {
                 timed_out = true;
@@ -67,6 +68,7 @@ public:
         return n;
     }
     bool timed_out = false;
+    bool cut_short = false;  // closed with Content-Length bytes still owed
 
 private:
     NetworkClient& _s;
@@ -93,10 +95,13 @@ On a board with PSRAM, allocate it there once at init and never free it:
 
 ```cpp
 #include <esp_heap_caps.h>
+#include <new>
 
 const size_t n = OA3_MAX_EVENTS;
 const size_t arena_size = OA3_JSON_ARENA_SIZE;
-auto* events = static_cast<oa3::Event*>(heap_caps_malloc(2 * n * sizeof(oa3::Event), MALLOC_CAP_SPIRAM));
+void* mem = heap_caps_aligned_alloc(alignof(oa3::Event), 2 * n * sizeof(oa3::Event), MALLOC_CAP_SPIRAM);
+oa3::Event* events = static_cast<oa3::Event*>(mem);
+for (size_t i = 0; i < 2 * n; ++i) new (&events[i]) oa3::Event();
 void* arena_buf = heap_caps_malloc(arena_size, MALLOC_CAP_SPIRAM);
 static oa3::JsonArena arena(arena_buf, arena_size);
 const oa3::VenStorage storage{events, events + n, n, &arena};
