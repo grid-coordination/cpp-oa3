@@ -2,7 +2,7 @@
 # Usage from a parent project: add_subdirectory(path/to/cpp-oa3) and link oa3, the umbrella,
 # or one component target (oa3_model, oa3_client).
 cmake_minimum_required(VERSION 3.18)
-project(oa3 VERSION 0.0.0 LANGUAGES CXX)
+project(oa3 VERSION 0.1.0 LANGUAGES CXX)
 
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     set(_oa3_top_level ON)

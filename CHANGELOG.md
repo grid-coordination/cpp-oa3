@@ -4,6 +4,10 @@ All notable changes to `cpp-oa3` are recorded here. Format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-13
+
+First release: a polling OpenADR 3.1.0 VEN that runs on the ESP32. An ESP32 port in esp32-firmware ran it for 10 hours on an Olimex ESP32-POE-ISO-WROVER against the price server, following every hourly price change with no heap drift.
+
 ### Added
 
 - CMake and PlatformIO build skeleton, Unity test harness, and CI for host (GCC, Clang) and ESP32.

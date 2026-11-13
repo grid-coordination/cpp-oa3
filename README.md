@@ -6,7 +6,7 @@ The library is the core only. A port supplies HTTP, MQTT, mDNS and the clock; th
 
 ## Status
 
-Pre-release. `oa3_model` (time, entities, streaming parse, intervals and prices) and `oa3_client` (`VenClient`, a polling VEN) are in place, with a POSIX port. The ESP32 port is in progress in esp32-firmware; [`doc/porting.md`](doc/porting.md) describes what a port supplies.
+0.1.0. `oa3_model` (time, entities, streaming parse, intervals and prices) and `oa3_client` (`VenClient`, a polling VEN), with a POSIX port. An ESP32 port in esp32-firmware has run it on an Olimex ESP32-POE-ISO-WROVER against the price server; [`doc/porting.md`](doc/porting.md) describes what a port supplies. MQTT notifications are next.
 
 ## Building on a host
 

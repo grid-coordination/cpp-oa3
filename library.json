@@ -1,6 +1,6 @@
 {
   "name": "oa3",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Portable C++ OpenADR 3.1.0 library for microcontrollers and POSIX: the entity model, a VEN client, and later a small VTN. Depends on the C/C++ standard library and ArduinoJson; a port supplies HTTP, MQTT, mDNS and the clock.",
   "keywords": "openadr, openadr3, demand-response, energy, esp32",
   "repository": {
