@@ -7,7 +7,7 @@ void tearDown() {}
 
 using oa3::DateTime;
 using oa3::Duration;
-using oa3::ZoneForm;
+using oa3::CivilTime;
 
 static DateTime dt_of(const char* s) {
     DateTime dt{};
@@ -35,6 +35,12 @@ static void assert_dur_roundtrip(const char* s) {
     TEST_ASSERT_EQUAL_STRING(s, buf);
 }
 
+static void assert_utc(const char* wire, const char* expected) {
+    char buf[oa3::kDateTimeStringSize];
+    TEST_ASSERT_TRUE_MESSAGE(oa3::format_datetime(dt_of(wire), buf, sizeof(buf)) > 0, wire);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(expected, buf, wire);
+}
+
 static void assert_add(const char* start, const char* dur, const char* expected) {
     char buf[oa3::kDateTimeStringSize];
     DateTime out{};
@@ -45,39 +51,33 @@ static void assert_add(const char* start, const char* dur, const char* expected)
 
 // python-oa3 tests/test_time.py:16-62 (parse_datetime)
 static void test_parse_rfc3339() {
-    DateTime dt = dt_of("2024-06-15T10:30:00Z");
-    TEST_ASSERT_EQUAL_INT(2024, dt.year);
-    TEST_ASSERT_EQUAL_UINT8(6, dt.month);
-    TEST_ASSERT_EQUAL_UINT8(15, dt.day);
-    TEST_ASSERT_EQUAL_UINT8(10, dt.hour);
-    TEST_ASSERT_EQUAL_UINT8(30, dt.minute);
-    TEST_ASSERT_EQUAL_UINT8(0, dt.second);
-    TEST_ASSERT_EQUAL(ZoneForm::kUtcZ, dt.zone);
-    TEST_ASSERT_EQUAL_INT16(0, dt.offset_minutes);
+    CivilTime c = oa3::to_civil(dt_of("2024-06-15T10:30:00Z"));
+    TEST_ASSERT_EQUAL_INT(2024, c.year);
+    TEST_ASSERT_EQUAL_UINT8(6, c.month);
+    TEST_ASSERT_EQUAL_UINT8(15, c.day);
+    TEST_ASSERT_EQUAL_UINT8(10, c.hour);
+    TEST_ASSERT_EQUAL_UINT8(30, c.minute);
+    TEST_ASSERT_EQUAL_UINT8(0, c.second);
 }
 
 static void test_parse_with_offset() {
-    DateTime dt = dt_of("2024-06-15T10:30:00-05:00");
-    TEST_ASSERT_EQUAL(ZoneForm::kOffset, dt.zone);
-    TEST_ASSERT_EQUAL_INT16(-300, dt.offset_minutes);
+    TEST_ASSERT_EQUAL_INT(0, oa3::compare(dt_of("2024-06-15T10:30:00-05:00"), dt_of("2024-06-15T15:30:00Z")));
+    TEST_ASSERT_EQUAL_UINT8(15, oa3::to_civil(dt_of("2024-06-15T10:30:00-05:00")).hour);
 }
 
 static void test_parse_space_with_tz() {
-    DateTime dt = dt_of("2024-06-15 10:30:00Z");
-    TEST_ASSERT_EQUAL_UINT8(10, dt.hour);
-    TEST_ASSERT_EQUAL(ZoneForm::kUtcZ, dt.zone);
+    TEST_ASSERT_EQUAL_UINT8(10, oa3::to_civil(dt_of("2024-06-15 10:30:00Z")).hour);
 }
 
 static void test_parse_vtn_ri_mqtt_format() {
-    DateTime dt = dt_of("2026-03-08 19:22:06");
-    TEST_ASSERT_EQUAL_INT(2026, dt.year);
-    TEST_ASSERT_EQUAL_UINT8(3, dt.month);
-    TEST_ASSERT_EQUAL_UINT8(8, dt.day);
-    TEST_ASSERT_EQUAL_UINT8(19, dt.hour);
-    TEST_ASSERT_EQUAL_UINT8(22, dt.minute);
-    TEST_ASSERT_EQUAL_UINT8(6, dt.second);
-    TEST_ASSERT_EQUAL(ZoneForm::kNone, dt.zone);
-    TEST_ASSERT_EQUAL_INT16(0, dt.offset_minutes);
+    CivilTime c = oa3::to_civil(dt_of("2026-03-08 19:22:06"));
+    TEST_ASSERT_EQUAL_INT(2026, c.year);
+    TEST_ASSERT_EQUAL_UINT8(3, c.month);
+    TEST_ASSERT_EQUAL_UINT8(8, c.day);
+    TEST_ASSERT_EQUAL_UINT8(19, c.hour);
+    TEST_ASSERT_EQUAL_UINT8(22, c.minute);
+    TEST_ASSERT_EQUAL_UINT8(6, c.second);
+    assert_utc("2026-03-08 19:22:06", "2026-03-08T19:22:06Z");
 }
 
 static void test_parse_empty_and_null() {
@@ -92,33 +92,28 @@ static void test_vtn_ri_form_equals_utc() {
     TEST_ASSERT_EQUAL_INT(0, oa3::compare(dt_of("2024-06-15 09:30:00"), dt_of("2024-06-15T09:30:00Z")));
 }
 
-// clj-oa3 test/openadr3/entities_test.clj:485-504 (offset preserved, same instant)
-static void test_offset_preserved_same_instant() {
-    DateTime a = dt_of("2026-05-03T00:00:00-07:00");
-    TEST_ASSERT_EQUAL_INT16(-420, a.offset_minutes);
-    TEST_ASSERT_EQUAL_INT(0, oa3::compare(a, dt_of("2026-05-03T07:00:00Z")));
+// clj-oa3 test/openadr3/entities_test.clj:485-504 (same instant); the offset is now applied, not kept.
+static void test_offset_converted_to_utc() {
+    TEST_ASSERT_EQUAL_INT(0, oa3::compare(dt_of("2026-05-03T00:00:00-07:00"), dt_of("2026-05-03T07:00:00Z")));
+    assert_utc("2026-05-03T00:00:00-07:00", "2026-05-03T07:00:00Z");
     TEST_ASSERT_EQUAL_INT(0, oa3::compare(dt_of("2026-05-03T00:00:00+00:00"), dt_of("2026-05-03T00:00:00Z")));
 }
 
 static void test_parse_date_alone() {
     DateTime dt = dt_of("2024-06-15");
-    TEST_ASSERT_EQUAL(ZoneForm::kNone, dt.zone);
-    TEST_ASSERT_EQUAL_UINT8(0, dt.hour);
+    TEST_ASSERT_EQUAL_UINT8(0, oa3::to_civil(dt).hour);
     char buf[oa3::kDateTimeStringSize];
     oa3::format_datetime(dt, buf, sizeof(buf));
     TEST_ASSERT_EQUAL_STRING("2024-06-15T00:00:00Z", buf);
 }
 
 static void test_parse_variants_accepted() {
-    DateTime dt = dt_of("  2024-06-15t10:30:00z \r\n");
-    TEST_ASSERT_EQUAL(ZoneForm::kUtcZ, dt.zone);
-    dt = dt_of("2024-02-29T23:59:59.5+14:00");
+    assert_utc("  2024-06-15t10:30:00z \r\n", "2024-06-15T10:30:00Z");
+    DateTime dt = dt_of("2024-02-29T23:59:59.5+14:00");
     TEST_ASSERT_EQUAL_UINT32(500000000, dt.nanos);
     TEST_ASSERT_EQUAL_UINT8(1, dt.frac_digits);
-    TEST_ASSERT_EQUAL_INT16(840, dt.offset_minutes);
-    dt = dt_of("2024-06-15T10:30:00-00:00");
-    TEST_ASSERT_EQUAL(ZoneForm::kOffset, dt.zone);
-    TEST_ASSERT_EQUAL_INT16(0, dt.offset_minutes);
+    assert_utc("2024-02-29T23:59:59.5+14:00", "2024-02-29T09:59:59.5Z");
+    assert_utc("2024-06-15T10:30:00-00:00", "2024-06-15T10:30:00Z");
 }
 
 static void test_parse_fraction_truncated() {
@@ -152,44 +147,40 @@ static void test_parse_never_reads_past_len() {
     const char s[] = "2024-06-15T10:30:00Zjunk";
     DateTime dt{};
     TEST_ASSERT_TRUE(oa3::parse_datetime(s, 20, &dt));
-    TEST_ASSERT_EQUAL(ZoneForm::kUtcZ, dt.zone);
     TEST_ASSERT_TRUE(oa3::parse_datetime(s, 19, &dt));
-    TEST_ASSERT_EQUAL(ZoneForm::kNone, dt.zone);
+    TEST_ASSERT_EQUAL_INT64(1718447400, oa3::to_unix(dt));
     TEST_ASSERT_FALSE(oa3::parse_datetime(s, 18, &dt));
     TEST_ASSERT_FALSE(oa3::parse_datetime(s, 0, &dt));
 }
 
-// python-oa3 tests/test_time.py:101-135 (wire offset preservation)
+// python-oa3 tests/test_time.py:101-135 (wire round trip); offsets now come back as UTC.
 static void test_wire_roundtrip() {
     assert_dt_roundtrip("2024-06-15T10:30:00Z");
-    assert_dt_roundtrip("2024-06-15T10:30:00+00:00");
-    assert_dt_roundtrip("2024-06-15T10:30:00-07:00");
-    assert_dt_roundtrip("2024-06-15T10:30:00+05:30");
     assert_dt_roundtrip("2024-06-15T10:30:00.123456Z");
-    assert_dt_roundtrip("2024-06-15T10:30:00.123456-07:00");
-    TEST_ASSERT_EQUAL_INT16(-420, dt_of("2024-06-15T10:30:00-07:00").offset_minutes);
-    TEST_ASSERT_EQUAL_INT16(330, dt_of("2024-06-15T10:30:00+05:30").offset_minutes);
-    TEST_ASSERT_EQUAL_INT16(0, dt_of("2024-06-15T10:30:00Z").offset_minutes);
+    assert_utc("2024-06-15T10:30:00+00:00", "2024-06-15T10:30:00Z");
+    assert_utc("2024-06-15T10:30:00-07:00", "2024-06-15T17:30:00Z");
+    assert_utc("2024-06-15T10:30:00+05:30", "2024-06-15T05:00:00Z");
+    assert_utc("2024-06-15T10:30:00.123456-07:00", "2024-06-15T17:30:00.123456Z");
 }
 
 static void test_wire_roundtrip_fractions() {
     assert_dt_roundtrip("2026-04-11T18:59:48.471661791Z");
     assert_dt_roundtrip("2026-04-11T18:59:48.0Z");
-    assert_dt_roundtrip("2026-04-11T18:59:48.100-09:30");
+    assert_utc("2026-04-11T18:59:48.100-09:30", "2026-04-12T04:29:48.100Z");
     assert_dt_roundtrip("0000-01-01T00:00:00Z");
-    assert_dt_roundtrip("9999-12-31T23:59:59.999999999-23:59");
+    assert_dt_roundtrip("9999-12-31T23:59:59.999999999Z");
 }
 
 static void test_format_limits() {
-    DateTime dt = dt_of("9999-12-31T23:59:59.999999999-23:59");
+    DateTime dt = dt_of("9999-12-31T23:59:59.999999999Z");
     char buf[oa3::kDateTimeStringSize];
-    TEST_ASSERT_EQUAL_size_t(35, oa3::format_datetime(dt, buf, sizeof(buf)));
-    TEST_ASSERT_EQUAL_size_t(0, oa3::format_datetime(dt, buf, 35));
+    TEST_ASSERT_EQUAL_size_t(30, oa3::format_datetime(dt, buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_size_t(0, oa3::format_datetime(dt, buf, 30));
     TEST_ASSERT_EQUAL_size_t(0, oa3::format_datetime(dt, nullptr, 0));
-    dt.year = 10000;
-    TEST_ASSERT_EQUAL_size_t(0, oa3::format_datetime(dt, buf, sizeof(buf)));
-    dt.year = -1;
-    TEST_ASSERT_EQUAL_size_t(0, oa3::format_datetime(dt, buf, sizeof(buf)));
+    // An offset can carry a wire year 0000 or 9999 outside the formattable years.
+    TEST_ASSERT_EQUAL_size_t(0, oa3::format_datetime(dt_of("9999-12-31T23:59:59-00:01"), buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_size_t(0, oa3::format_datetime(dt_of("0000-01-01T00:00:00+00:01"), buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_size_t(0, oa3::format_datetime(DateTime{INT64_MAX, 0, 0}, buf, sizeof(buf)));
 }
 
 static void test_to_unix() {
@@ -202,24 +193,26 @@ static void test_to_unix() {
     TEST_ASSERT_EQUAL_INT64(253402300799LL, oa3::to_unix(dt_of("9999-12-31T23:59:59Z")));
 }
 
-static DateTime from_unix_ok(int64_t secs, uint32_t nanos = 0, int16_t offset = 0) {
+static DateTime from_unix_ok(int64_t secs, uint32_t nanos = 0) {
     DateTime dt{};
-    TEST_ASSERT_TRUE(oa3::from_unix(secs, nanos, offset, &dt));
+    TEST_ASSERT_TRUE(oa3::from_unix(secs, nanos, &dt));
     return dt;
 }
 
 static void test_from_unix() {
     char buf[oa3::kDateTimeStringSize];
     DateTime dt = from_unix_ok(1718447400);
-    TEST_ASSERT_EQUAL(ZoneForm::kUtcZ, dt.zone);
     oa3::format_datetime(dt, buf, sizeof(buf));
     TEST_ASSERT_EQUAL_STRING("2024-06-15T10:30:00Z", buf);
 
-    dt = from_unix_ok(1718447400, 250000000, -420);
-    TEST_ASSERT_EQUAL(ZoneForm::kOffset, dt.zone);
+    dt = from_unix_ok(1718447400, 250000000);
     TEST_ASSERT_EQUAL_UINT8(2, dt.frac_digits);
     oa3::format_datetime(dt, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("2024-06-15T03:30:00.25-07:00", buf);
+    TEST_ASSERT_EQUAL_STRING("2024-06-15T10:30:00.25Z", buf);
+
+    dt = from_unix_ok(1718447400, 1250000000);
+    TEST_ASSERT_EQUAL_INT64(1718447401, oa3::to_unix(dt));
+    TEST_ASSERT_EQUAL_UINT32(250000000, dt.nanos);
 
     dt = from_unix_ok(-1, 999999999);
     oa3::format_datetime(dt, buf, sizeof(buf));
@@ -230,53 +223,49 @@ static void test_from_unix() {
     TEST_ASSERT_EQUAL_STRING("0000-01-01T00:00:00Z", buf);
 
     // Beyond the wire range, as P9999Y results reach.
-    dt = from_unix_ok(253402300800LL);
-    TEST_ASSERT_EQUAL_INT(10000, dt.year);
-    TEST_ASSERT_EQUAL_UINT8(1, dt.month);
-    TEST_ASSERT_EQUAL_UINT8(1, dt.day);
+    CivilTime c = oa3::to_civil(from_unix_ok(253402300800LL));
+    TEST_ASSERT_EQUAL_INT(10000, c.year);
+    TEST_ASSERT_EQUAL_UINT8(1, c.month);
+    TEST_ASSERT_EQUAL_UINT8(1, c.day);
     // 12000-01-01 is five 400-year cycles (146097 days each) after 10000-01-01.
-    dt = from_unix_ok((2932897LL + 5 * 146097) * 86400 + 3661);
-    TEST_ASSERT_EQUAL_INT(12000, dt.year);
-    TEST_ASSERT_EQUAL_UINT8(1, dt.month);
-    TEST_ASSERT_EQUAL_UINT8(1, dt.day);
-    TEST_ASSERT_EQUAL_UINT8(1, dt.hour);
-    TEST_ASSERT_EQUAL_UINT8(1, dt.minute);
-    TEST_ASSERT_EQUAL_UINT8(1, dt.second);
+    c = oa3::to_civil(from_unix_ok((2932897LL + 5 * 146097) * 86400 + 3661));
+    TEST_ASSERT_EQUAL_INT(12000, c.year);
+    TEST_ASSERT_EQUAL_UINT8(1, c.month);
+    TEST_ASSERT_EQUAL_UINT8(1, c.day);
+    TEST_ASSERT_EQUAL_UINT8(1, c.hour);
+    TEST_ASSERT_EQUAL_UINT8(1, c.minute);
+    TEST_ASSERT_EQUAL_UINT8(1, c.second);
 
     dt = from_unix_ok(-86400LL * 800000);
     TEST_ASSERT_EQUAL_INT64(-86400LL * 800000, oa3::to_unix(dt));
-    TEST_ASSERT_TRUE(dt.year < 0);
+    TEST_ASSERT_TRUE(oa3::to_civil(dt).year < 0);
 
     TEST_ASSERT_TRUE(oa3::from_unix(1718447400, &dt));
     TEST_ASSERT_EQUAL_INT64(1718447400, oa3::to_unix(dt));
 }
 
-// The year once wrapped through int16_t, and INT64_MAX plus an offset overflowed.
 static void test_from_unix_out_of_range() {
     DateTime dt{};
     TEST_ASSERT_FALSE(oa3::from_unix(2000000000000LL, &dt));
     TEST_ASSERT_FALSE(oa3::from_unix(-2000000000000LL, &dt));
-    TEST_ASSERT_FALSE(oa3::from_unix(INT64_MAX, 0, 60, &dt));
-    TEST_ASSERT_FALSE(oa3::from_unix(INT64_MIN, 0, -60, &dt));
-    TEST_ASSERT_FALSE(oa3::from_unix(INT64_MAX, UINT32_MAX, 0, &dt));
+    TEST_ASSERT_FALSE(oa3::from_unix(INT64_MAX, &dt));
+    TEST_ASSERT_FALSE(oa3::from_unix(INT64_MIN, &dt));
+    TEST_ASSERT_FALSE(oa3::from_unix(INT64_MAX, UINT32_MAX, &dt));
     // 32767-12-31T23:59:59Z is the last second in range.
     const int64_t last = (oa3::days_from_civil(32768, 1, 1)) * 86400 - 1;
     dt = from_unix_ok(last);
-    TEST_ASSERT_EQUAL_INT(32767, dt.year);
+    TEST_ASSERT_EQUAL_INT(32767, oa3::to_civil(dt).year);
     TEST_ASSERT_FALSE(oa3::from_unix(last + 1, &dt));
-    TEST_ASSERT_FALSE(oa3::from_unix(last, 0, 1, &dt));
+    TEST_ASSERT_FALSE(oa3::from_unix(last, 1000000000, &dt));
 }
 
 static void test_offsets_cross_utc_dates() {
-    char buf[oa3::kDateTimeStringSize];
     TEST_ASSERT_EQUAL_INT64(oa3::to_unix(dt_of("2024-06-16T03:00:00Z")),
                             oa3::to_unix(dt_of("2024-06-15T20:00:00-07:00")));
     TEST_ASSERT_EQUAL_INT64(oa3::to_unix(dt_of("2024-12-31T23:30:00Z")),
                             oa3::to_unix(dt_of("2025-01-01T00:30:00+01:00")));
-    DateTime dt = from_unix_ok(oa3::to_unix(dt_of("2024-06-16T03:00:00Z")), 0, -420);
-    oa3::format_datetime(dt, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("2024-06-15T20:00:00-07:00", buf);
-    assert_add("2024-06-15T23:00:00-07:00", "PT2H", "2024-06-16T01:00:00-07:00");
+    assert_utc("2025-01-01T00:30:00+01:00", "2024-12-31T23:30:00Z");
+    assert_add("2024-06-15T23:00:00-07:00", "PT2H", "2024-06-16T08:00:00Z");
 }
 
 static void test_civil_roundtrip_range() {
@@ -466,17 +455,18 @@ static void test_duration_sum() {
 
 // pendulum results measured through python-oa3 _advance_datetime (P1M add exit criteria)
 static void test_add_calendar_pendulum() {
-    assert_add("2024-01-31T20:00:00-08:00", "P1M", "2024-02-29T20:00:00-08:00");
+    assert_add("2024-01-31T20:00:00-08:00", "P1M", "2024-03-01T04:00:00Z");
     assert_add("2023-01-31T00:00:00Z", "P1M", "2023-02-28T00:00:00Z");
     assert_add("2024-02-29T00:00:00Z", "P1Y", "2025-02-28T00:00:00Z");
     assert_add("2024-02-29T00:00:00Z", "P4Y", "2028-02-29T00:00:00Z");
     assert_add("2024-01-31T00:00:00Z", "P1M1D", "2024-03-01T00:00:00Z");
     assert_add("2024-01-31T00:00:00Z", "P1MT24H", "2024-03-01T00:00:00Z");
     assert_add("2024-01-31T00:00:00Z", "P1Y1M", "2025-02-28T00:00:00Z");
-    assert_add("2024-03-31T23:30:00+05:30", "P1M", "2024-04-30T23:30:00+05:30");
-    // Month math on the local wall clock; in UTC these would land on the 31st.
-    assert_add("2024-02-29T20:00:00-08:00", "P1M", "2024-03-29T20:00:00-08:00");
-    assert_add("2024-04-30T20:00:00-08:00", "P1M", "2024-05-30T20:00:00-08:00");
+    assert_add("2024-03-31T23:30:00+05:30", "P1M", "2024-04-30T18:00:00Z");
+    // pendulum added on the -08:00 wall clock (03-29T20:00-08:00, 05-30T20:00-08:00); in UTC the
+    // month is added to 03-01 and 05-01.
+    assert_add("2024-02-29T20:00:00-08:00", "P1M", "2024-04-01T04:00:00Z");
+    assert_add("2024-04-30T20:00:00-08:00", "P1M", "2024-06-01T04:00:00Z");
 }
 
 static void test_add_elapsed() {
@@ -485,11 +475,8 @@ static void test_add_elapsed() {
     assert_add("2026-11-01T07:00:00Z", "PT25H", "2026-11-02T08:00:00Z");
     assert_add("2024-06-15T00:00:00Z", "P2W", "2024-06-29T00:00:00Z");
     assert_add("2024-06-15T00:00:00Z", "PT36H", "2024-06-16T12:00:00Z");
-    assert_add("2024-06-15T10:00:00-07:00", "PT15M", "2024-06-15T10:15:00-07:00");
+    assert_add("2024-06-15T10:00:00-07:00", "PT15M", "2024-06-15T17:15:00Z");
     assert_add("2024-06-15 10:00:00", "PT1H", "2024-06-15T11:00:00Z");
-    DateTime out{};
-    TEST_ASSERT_TRUE(oa3::add(dt_of("2024-06-15 10:00:00"), dur_of("PT1H"), &out));
-    TEST_ASSERT_EQUAL(ZoneForm::kNone, out.zone);
 }
 
 static void test_add_negative() {
@@ -502,7 +489,7 @@ static void test_add_negative() {
 static void test_add_indefinite_and_fraction() {
     DateTime out{};
     TEST_ASSERT_TRUE(oa3::add(dt_of("2024-06-15T10:00:00Z"), dur_of("P9999Y"), &out));
-    TEST_ASSERT_EQUAL_INT(12023, out.year);
+    TEST_ASSERT_EQUAL_INT(12023, oa3::to_civil(out).year);
     TEST_ASSERT_EQUAL_INT64(oa3::to_unix(dt_of("2024-06-15T10:00:00Z")) +
                                 (oa3::days_from_civil(12023, 6, 15) - oa3::days_from_civil(2024, 6, 15)) * 86400,
                             oa3::to_unix(out));
@@ -523,7 +510,7 @@ int main() {
     RUN_TEST(test_parse_vtn_ri_mqtt_format);
     RUN_TEST(test_parse_empty_and_null);
     RUN_TEST(test_vtn_ri_form_equals_utc);
-    RUN_TEST(test_offset_preserved_same_instant);
+    RUN_TEST(test_offset_converted_to_utc);
     RUN_TEST(test_parse_date_alone);
     RUN_TEST(test_parse_variants_accepted);
     RUN_TEST(test_parse_fraction_truncated);

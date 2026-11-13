@@ -96,7 +96,7 @@ static void test_passthrough() {
     TEST_ASSERT_EQUAL_INT32(15, r[0].duration.minutes);
     assert_dt("2024-06-15T21:00:00Z", r[1].start);
     TEST_ASSERT_EQUAL_INT32(30, r[1].duration.minutes);
-    TEST_ASSERT_EQUAL_INT64(ux("2024-06-15T21:30:00Z"), r[1].end_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2024-06-15T21:30:00Z"), oa3::to_unix(r[1].period.end));
 }
 
 static void test_inherits_start_and_duration() {
@@ -111,8 +111,8 @@ static void test_inherits_start_and_duration() {
     TEST_ASSERT_TRUE(r[0].has_period);
     assert_dt("2024-06-15T14:00:00Z", r[0].start);
     TEST_ASSERT_EQUAL_INT32(1, r[0].duration.hours);
-    TEST_ASSERT_EQUAL_INT64(ux("2024-06-15T14:00:00Z"), r[0].start_unix);
-    TEST_ASSERT_EQUAL_INT64(ux("2024-06-15T15:00:00Z"), r[0].end_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2024-06-15T14:00:00Z"), oa3::to_unix(r[0].period.start));
+    TEST_ASSERT_EQUAL_INT64(ux("2024-06-15T15:00:00Z"), oa3::to_unix(r[0].period.end));
 }
 
 static void test_duration_only_inherits_start() {
@@ -213,7 +213,7 @@ static void test_clj_start_only_end() {
     add_price(e, 0, "2024-06-15T15:30:00Z", nullptr, 1);
     ResolvedInterval r[1];
     oa3::resolve_intervals(e, r, 1);
-    TEST_ASSERT_EQUAL_INT64(ux("2024-06-15T16:30:00Z"), r[0].end_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2024-06-15T16:30:00Z"), oa3::to_unix(r[0].period.end));
 }
 
 static void test_clj_sequential_pt30m() {
@@ -303,7 +303,7 @@ static void test_sequential_sentinel_start() {
     oa3::resolve_intervals(g, r, 3);
     assert_dt("2026-11-12T05:30:00Z", r[1].start);
     assert_dt("2026-11-12T06:30:00Z", r[2].start);
-    TEST_ASSERT_EQUAL_INT64(ux("2026-11-12T06:45:00Z"), r[2].end_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-12T06:45:00Z"), oa3::to_unix(r[2].period.end));
 }
 
 static void test_sequential_sentinel_without_event_start() {
@@ -313,8 +313,9 @@ static void test_sequential_sentinel_without_event_start() {
     add_price(e, 1, "0001-01-01", "PT1H", 2);
     ResolvedInterval r[2];
     oa3::resolve_intervals(e, r, 2);
-    TEST_ASSERT_EQUAL_INT16(1, r[0].start.year);
-    TEST_ASSERT_EQUAL_INT16(10000, r[1].start.year);
+    TEST_ASSERT_EQUAL_INT(1, oa3::to_civil(r[0].start).year);
+    TEST_ASSERT_TRUE(r[0].period.end_indefinite);
+    TEST_ASSERT_EQUAL_INT(10000, oa3::to_civil(r[1].start).year);
     PriceAt p;
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 1, ux("2026-11-12T00:00:00Z"), "PRICE", &p));
     TEST_ASSERT_EQUAL_DOUBLE(1, p.value->number);
@@ -368,29 +369,36 @@ static void test_explicit_start_does_not_reset_accumulation() {
     assert_dt("2024-06-15T13:00:00Z", r[1].start);
 }
 
-static void test_inherited_start_keeps_offset() {
+// Was -08:00 with month math on the wall clock; in UTC the same clamp needs a UTC Jan 31.
+static void test_inherited_start_clamps_month() {
     Event& e = g_events[0];
-    set_event_period(e, "2024-01-31T20:00:00-08:00", "P1M");
+    set_event_period(e, "2024-01-31T20:00:00Z", "P1M");
     add_price(e, 0, nullptr, nullptr, 1);
     add_price(e, 1, nullptr, nullptr, 2);
     ResolvedInterval r[2];
     oa3::resolve_intervals(e, r, 2);
-    TEST_ASSERT_EQUAL_INT16(-480, r[1].start.offset_minutes);
-    TEST_ASSERT_EQUAL_UINT8(2, r[1].start.month);
-    TEST_ASSERT_EQUAL_UINT8(29, r[1].start.day);
-    TEST_ASSERT_EQUAL_INT64(ux("2024-02-29T20:00:00-08:00"), r[0].end_unix);
+    TEST_ASSERT_EQUAL_UINT8(2, oa3::to_civil(r[1].start).month);
+    TEST_ASSERT_EQUAL_UINT8(29, oa3::to_civil(r[1].start).day);
+    TEST_ASSERT_EQUAL_INT64(ux("2024-02-29T20:00:00Z"), oa3::to_unix(r[0].period.end));
+
+    // An offset start is converted first: 2024-02-01T04:00Z + P1M.
+    Event& f = g_events[1];
+    set_event_period(f, "2024-01-31T20:00:00-08:00", "P1M");
+    add_price(f, 0, nullptr, nullptr, 1);
+    oa3::resolve_intervals(f, r, 1);
+    TEST_ASSERT_EQUAL_INT64(ux("2024-03-01T04:00:00Z"), oa3::to_unix(r[0].period.end));
 }
 
 static void test_inherited_p1m_sums_before_adding() {
     // python adds the summed durations once: Jan 31 + P2M is Mar 31; Jan 31 + P1M + P1M is Mar 29.
     Event& e = g_events[0];
-    set_event_period(e, "2024-01-31T20:00:00-08:00", "P1M");
+    set_event_period(e, "2024-01-31T20:00:00Z", "P1M");
     for (int i = 0; i < 3; ++i) add_price(e, i, nullptr, nullptr, i);
     ResolvedInterval r[3];
     oa3::resolve_intervals(e, r, 3);
     char buf[oa3::kDateTimeStringSize];
     oa3::format_datetime(r[2].start, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("2024-03-31T20:00:00-08:00", buf);
+    TEST_ASSERT_EQUAL_STRING("2024-03-31T20:00:00Z", buf);
 }
 
 static void test_resolver_reset() {
@@ -457,10 +465,10 @@ static void test_price_server_shape_active() {
     TEST_ASSERT_EQUAL_UINT16(0, p.value_index);
     TEST_ASSERT_EQUAL_UINT16(1, p.value_count);
     TEST_ASSERT_EQUAL_DOUBLE(0.050294, p.value->number);
-    TEST_ASSERT_EQUAL_INT64(ux("2026-11-14T08:00:00Z"), p.start_unix);
-    TEST_ASSERT_EQUAL_INT64(ux("2026-11-14T09:00:00Z"), p.end_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-14T08:00:00Z"), oa3::to_unix(p.span.start));
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-14T09:00:00Z"), oa3::to_unix(p.span.end));
     TEST_ASSERT_TRUE(p.has_next_change);
-    TEST_ASSERT_EQUAL_INT64(ux("2026-11-14T09:00:00Z"), p.next_change_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-14T09:00:00Z"), oa3::to_unix(p.next_change));
 
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 3, ux("2026-11-13T08:00:00Z"), "PRICE", &p));
     TEST_ASSERT_EQUAL_PTR(&g_events[1], p.event);
@@ -469,7 +477,7 @@ static void test_price_server_shape_active() {
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 3, ux("2026-11-13T07:59:59Z"), "PRICE", &p));
     TEST_ASSERT_EQUAL_PTR(&g_events[2], p.event);
     TEST_ASSERT_EQUAL_UINT16(23, p.interval_index);
-    TEST_ASSERT_EQUAL_INT64(ux("2026-11-13T08:00:00Z"), p.next_change_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-13T08:00:00Z"), oa3::to_unix(p.next_change));
 }
 
 static void test_price_server_shape_datetime_overload() {
@@ -488,7 +496,7 @@ static void test_before_every_event() {
     TEST_ASSERT_NULL(p.event);
     TEST_ASSERT_NULL(p.value);
     TEST_ASSERT_TRUE(p.has_next_change);
-    TEST_ASSERT_EQUAL_INT64(ux("2026-11-12T08:00:00Z"), p.next_change_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-12T08:00:00Z"), oa3::to_unix(p.next_change));
 }
 
 static void test_after_every_event() {
@@ -522,15 +530,15 @@ static void test_multi_valued_payload_sub_intervals() {
     TEST_ASSERT_EQUAL_DOUBLE(0.03, p.value->number);
     TEST_ASSERT_EQUAL_UINT16(1, p.value_index);
     TEST_ASSERT_EQUAL_UINT16(1, p.value_count);
-    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T01:00:00Z"), p.start_unix);
-    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T02:00:00Z"), p.end_unix);
-    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T02:00:00Z"), p.next_change_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T01:00:00Z"), oa3::to_unix(p.span.start));
+    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T02:00:00Z"), oa3::to_unix(p.span.end));
+    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T02:00:00Z"), oa3::to_unix(p.next_change));
 
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 1, ux("2025-06-25T00:00:00Z"), "PRICE", &p));
     TEST_ASSERT_EQUAL_DOUBLE(0.17, p.value->number);
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 1, ux("2025-06-25T02:59:59Z"), "PRICE", &p));
     TEST_ASSERT_EQUAL_DOUBLE(0.11, p.value->number);
-    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T03:00:00Z"), p.end_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T03:00:00Z"), oa3::to_unix(p.span.end));
     TEST_ASSERT_FALSE(oa3::price_at(g_events, 1, ux("2025-06-25T03:00:00Z"), "PRICE", &p));
 }
 
@@ -542,12 +550,12 @@ static void test_multi_valued_uneven_split() {
     PriceAt p;
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 1, s + 514, "GHG", &p));
     TEST_ASSERT_EQUAL_UINT16(1, p.value_index);
-    TEST_ASSERT_EQUAL_INT64(s + 514, p.start_unix);
-    TEST_ASSERT_EQUAL_INT64(s + 1028, p.end_unix);
+    TEST_ASSERT_EQUAL_INT64(s + 514, oa3::to_unix(p.span.start));
+    TEST_ASSERT_EQUAL_INT64(s + 1028, oa3::to_unix(p.span.end));
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 1, s + 3599, "GHG", &p));
     TEST_ASSERT_EQUAL_UINT16(6, p.value_index);
-    TEST_ASSERT_EQUAL_INT64(s + 514 * 6, p.start_unix);
-    TEST_ASSERT_EQUAL_INT64(s + 3600, p.end_unix);
+    TEST_ASSERT_EQUAL_INT64(s + 514 * 6, oa3::to_unix(p.span.start));
+    TEST_ASSERT_EQUAL_INT64(s + 3600, oa3::to_unix(p.span.end));
 }
 
 static void test_non_unitary_type_whole_span() {
@@ -557,8 +565,8 @@ static void test_non_unitary_type_whole_span() {
     TEST_ASSERT_EQUAL_UINT16(0, p.value_index);
     TEST_ASSERT_EQUAL_UINT16(3, p.value_count);
     TEST_ASSERT_EQUAL_DOUBLE(0.17, p.value->number);
-    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T00:00:00Z"), p.start_unix);
-    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T03:00:00Z"), p.end_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T00:00:00Z"), oa3::to_unix(p.span.start));
+    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T03:00:00Z"), oa3::to_unix(p.span.end));
 }
 
 static void test_empty_payload_not_a_candidate() {
@@ -584,7 +592,7 @@ static void test_gap_next_change_is_next_start() {
     add_price(e, 1, "2025-06-25T03:00:00Z", "PT1H", 2.0);
     PriceAt p;
     TEST_ASSERT_FALSE(oa3::price_at(g_events, 1, ux("2025-06-25T01:30:00Z"), "PRICE", &p));
-    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T03:00:00Z"), p.next_change_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T03:00:00Z"), oa3::to_unix(p.next_change));
 }
 
 static void test_priority_overlap() {
@@ -600,10 +608,10 @@ static void test_priority_overlap() {
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 2, ux("2025-06-25T01:30:00Z"), "PRICE", &p));
     TEST_ASSERT_EQUAL_PTR(&high, p.event);
     TEST_ASSERT_EQUAL_DOUBLE(9.0, p.value->number);
-    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T02:00:00Z"), p.next_change_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T02:00:00Z"), oa3::to_unix(p.next_change));
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 2, ux("2025-06-25T00:30:00Z"), "PRICE", &p));
     TEST_ASSERT_EQUAL_PTR(&low, p.event);
-    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T01:00:00Z"), p.next_change_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2025-06-25T01:00:00Z"), oa3::to_unix(p.next_change));
 }
 
 static void test_absent_priority_ranks_below_present() {
@@ -650,7 +658,7 @@ static void test_event_duration_shortens() {
     PriceAt p;
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 1, ux("2026-01-01T11:30:00Z"), "PRICE", &p));
     TEST_ASSERT_EQUAL_DOUBLE(11, p.value->number);
-    TEST_ASSERT_EQUAL_INT64(ux("2026-01-01T12:00:00Z"), p.next_change_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-01-01T12:00:00Z"), oa3::to_unix(p.next_change));
     TEST_ASSERT_FALSE(oa3::price_at(g_events, 1, ux("2026-01-01T12:00:00Z"), "PRICE", &p));
     TEST_ASSERT_FALSE(p.has_next_change);
 }
@@ -659,8 +667,8 @@ static void test_event_duration_clips_mid_interval() {
     build_daily(g_events[0], "PT90M");
     PriceAt p;
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 1, ux("2026-01-01T01:15:00Z"), "PRICE", &p));
-    TEST_ASSERT_EQUAL_INT64(ux("2026-01-01T01:30:00Z"), p.end_unix);
-    TEST_ASSERT_EQUAL_INT64(ux("2026-01-01T01:30:00Z"), p.next_change_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-01-01T01:30:00Z"), oa3::to_unix(p.span.end));
+    TEST_ASSERT_EQUAL_INT64(ux("2026-01-01T01:30:00Z"), oa3::to_unix(p.next_change));
 }
 
 static void test_event_duration_p9999y_loops() {
@@ -669,16 +677,16 @@ static void test_event_duration_p9999y_loops() {
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 1, ux("2027-02-05T05:30:00Z"), "PRICE", &p));
     TEST_ASSERT_EQUAL_DOUBLE(5, p.value->number);
     TEST_ASSERT_EQUAL_UINT16(5, p.interval_index);
-    TEST_ASSERT_EQUAL_INT64(ux("2027-02-05T05:00:00Z"), p.start_unix);
-    TEST_ASSERT_EQUAL_INT64(ux("2027-02-05T06:00:00Z"), p.end_unix);
-    TEST_ASSERT_EQUAL_INT64(ux("2027-02-05T06:00:00Z"), p.next_change_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2027-02-05T05:00:00Z"), oa3::to_unix(p.span.start));
+    TEST_ASSERT_EQUAL_INT64(ux("2027-02-05T06:00:00Z"), oa3::to_unix(p.span.end));
+    TEST_ASSERT_EQUAL_INT64(ux("2027-02-05T06:00:00Z"), oa3::to_unix(p.next_change));
 
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 1, ux("2027-02-05T23:30:00Z"), "PRICE", &p));
     TEST_ASSERT_EQUAL_DOUBLE(23, p.value->number);
-    TEST_ASSERT_EQUAL_INT64(ux("2027-02-06T00:00:00Z"), p.next_change_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2027-02-06T00:00:00Z"), oa3::to_unix(p.next_change));
 
     TEST_ASSERT_FALSE(oa3::price_at(g_events, 1, ux("2025-12-31T23:00:00Z"), "PRICE", &p));
-    TEST_ASSERT_EQUAL_INT64(ux("2026-01-01T00:00:00Z"), p.next_change_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-01-01T00:00:00Z"), oa3::to_unix(p.next_change));
 }
 
 static void test_event_duration_p7d_repeats_for_a_week() {
@@ -687,8 +695,8 @@ static void test_event_duration_p7d_repeats_for_a_week() {
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 1, ux("2026-01-07T22:10:00Z"), "PRICE", &p));
     TEST_ASSERT_EQUAL_DOUBLE(22, p.value->number);
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 1, ux("2026-01-07T23:10:00Z"), "PRICE", &p));
-    TEST_ASSERT_EQUAL_INT64(ux("2026-01-08T00:00:00Z"), p.end_unix);
-    TEST_ASSERT_EQUAL_INT64(ux("2026-01-08T00:00:00Z"), p.next_change_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-01-08T00:00:00Z"), oa3::to_unix(p.span.end));
+    TEST_ASSERT_EQUAL_INT64(ux("2026-01-08T00:00:00Z"), oa3::to_unix(p.next_change));
     TEST_ASSERT_FALSE(oa3::price_at(g_events, 1, ux("2026-01-08T00:00:00Z"), "PRICE", &p));
     TEST_ASSERT_FALSE(p.has_next_change);
 }
@@ -723,7 +731,7 @@ static void test_loop_with_explicit_starts() {
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 1, ux("2026-01-04T08:30:00Z"), "PRICE", &p));
     TEST_ASSERT_EQUAL_DOUBLE(1.0, p.value->number);
     TEST_ASSERT_FALSE(oa3::price_at(g_events, 1, ux("2026-01-04T09:30:00Z"), "PRICE", &p));
-    TEST_ASSERT_EQUAL_INT64(ux("2026-01-04T10:00:00Z"), p.next_change_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-01-04T10:00:00Z"), oa3::to_unix(p.next_change));
 }
 
 static void test_fall_back_day_25_intervals() {
@@ -733,13 +741,13 @@ static void test_fall_back_day_25_intervals() {
     for (int i = 0; i < 25; ++i) add_price(e, i, nullptr, nullptr, 100 + i);
     ResolvedInterval r[OA3_MAX_INTERVALS];
     TEST_ASSERT_EQUAL_size_t(25, oa3::resolve_intervals(e, r, OA3_MAX_INTERVALS));
-    TEST_ASSERT_EQUAL_INT64(ux("2026-11-02T07:00:00Z"), r[24].start_unix);
-    TEST_ASSERT_EQUAL_INT64(ux("2026-11-02T08:00:00Z"), r[24].end_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-02T07:00:00Z"), oa3::to_unix(r[24].period.start));
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-02T08:00:00Z"), oa3::to_unix(r[24].period.end));
     PriceAt p;
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 1, ux("2026-11-02T07:30:00Z"), "PRICE", &p));
     TEST_ASSERT_EQUAL_UINT16(24, p.interval_index);
     TEST_ASSERT_EQUAL_DOUBLE(124, p.value->number);
-    TEST_ASSERT_EQUAL_INT64(ux("2026-11-02T08:00:00Z"), p.next_change_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-02T08:00:00Z"), oa3::to_unix(p.next_change));
 }
 
 static void test_fall_back_day_offset_starts() {
@@ -749,7 +757,74 @@ static void test_fall_back_day_offset_starts() {
     for (int i = 0; i < 25; ++i) add_price(e, i, nullptr, nullptr, 100 + i);
     ResolvedInterval r[OA3_MAX_INTERVALS];
     oa3::resolve_intervals(e, r, OA3_MAX_INTERVALS);
-    TEST_ASSERT_EQUAL_INT64(ux("2026-11-02T08:00:00Z"), r[24].end_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-02T08:00:00Z"), oa3::to_unix(r[24].period.end));
+}
+
+static void test_sub_second_hull_does_not_loop() {
+    Event& e = g_events[0];
+    e.has_duration = true;
+    e.duration = dur("PT1H");
+    add_price(e, 0, "2026-11-13T00:00:00Z", "PT0.5S", 1.0);
+    const oa3::EventExtent x = oa3::event_extent(e);
+    TEST_ASSERT_TRUE(x.has_period);
+    TEST_ASSERT_FALSE(x.looping);
+    PriceAt p;
+    TEST_ASSERT_FALSE(oa3::price_at(g_events, 1, ux("2026-11-13T00:10:00Z"), "PRICE", &p));
+}
+
+static void test_event_extent_looping_span() {
+    build_daily(g_events[0], "P7D");
+    const oa3::EventExtent x = oa3::event_extent(g_events[0]);
+    TEST_ASSERT_TRUE(x.has_period);
+    TEST_ASSERT_TRUE(x.looping);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-01-01T00:00:00Z"), oa3::to_unix(x.hull.start));
+    TEST_ASSERT_EQUAL_INT64(ux("2026-01-02T00:00:00Z"), oa3::to_unix(x.hull.end));
+    TEST_ASSERT_EQUAL_INT64(ux("2026-01-01T00:00:00Z"), oa3::to_unix(x.span.start));
+    TEST_ASSERT_EQUAL_INT64(ux("2026-01-08T00:00:00Z"), oa3::to_unix(x.span.end));
+}
+
+static void test_event_extent_hull_with_gap() {
+    Event& e = g_events[0];
+    add_price(e, 0, "2026-01-01T10:00:00Z", "PT1H", 2.0);
+    add_price(e, 1, "2026-01-01T08:00:00Z", "PT1H", 1.0);
+    const oa3::EventExtent x = oa3::event_extent(e);
+    TEST_ASSERT_TRUE(x.has_period);
+    TEST_ASSERT_FALSE(x.looping);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-01-01T08:00:00Z"), oa3::to_unix(x.hull.start));
+    TEST_ASSERT_EQUAL_INT64(ux("2026-01-01T11:00:00Z"), oa3::to_unix(x.hull.end));
+    TEST_ASSERT_EQUAL_INT64(oa3::to_unix(x.hull.end), oa3::to_unix(x.span.end));
+
+    memset(g_events, 0, sizeof(g_events));
+    add_price(g_events[0], 0, nullptr, nullptr, 1.0);
+    TEST_ASSERT_FALSE(oa3::event_extent(g_events[0]).has_period);
+}
+
+static void test_resolver_resolve_matches_next() {
+    Event& e = g_events[0];
+    set_event_period(e, "2026-01-01T00:00:00Z", "PT1H");
+    add_price(e, 0, nullptr, nullptr, 1.0);
+    add_price(e, 1, "2026-01-01T05:00:00Z", "PT30M", 2.0);
+    add_price(e, 2, "0001-01-01T00:00:00Z", nullptr, 3.0);
+    add_price(e, 3, nullptr, "PT2H", 4.0);
+    oa3::IntervalResolver by_event(e);
+    oa3::IntervalResolver by_period(&e.interval_period);
+    ResolvedInterval a;
+    ResolvedInterval b;
+    for (uint16_t i = 0; i < e.interval_count; ++i) {
+        TEST_ASSERT_TRUE(by_event.next(&a));
+        const oa3::Interval& iv = e.intervals[i];
+        by_period.resolve(iv.has_interval_period ? &iv.interval_period : nullptr, iv.id, &b);
+        TEST_ASSERT_EQUAL_UINT16(a.index, b.index);
+        TEST_ASSERT_EQUAL_INT32(a.id, b.id);
+        TEST_ASSERT_EQUAL(a.has_period, b.has_period);
+        TEST_ASSERT_EQUAL_INT64(oa3::to_unix(a.period.start), oa3::to_unix(b.period.start));
+        TEST_ASSERT_EQUAL_INT64(oa3::to_unix(a.period.end), oa3::to_unix(b.period.end));
+        if (i == 2) {
+            TEST_ASSERT_EQUAL_INT64(ux("2026-01-01T05:30:00Z"), oa3::to_unix(b.period.start));
+        }
+    }
+    TEST_ASSERT_FALSE(by_event.next(&a));
+    TEST_ASSERT_FALSE(by_period.next(&b));
 }
 
 int main() {
@@ -774,7 +849,7 @@ int main() {
     RUN_TEST(test_empty_interval_period_inherits);
     RUN_TEST(test_accumulates_only_present_durations);
     RUN_TEST(test_explicit_start_does_not_reset_accumulation);
-    RUN_TEST(test_inherited_start_keeps_offset);
+    RUN_TEST(test_inherited_start_clamps_month);
     RUN_TEST(test_inherited_p1m_sums_before_adding);
     RUN_TEST(test_resolver_reset);
     RUN_TEST(test_unitary_types);
@@ -800,5 +875,9 @@ int main() {
     RUN_TEST(test_loop_with_explicit_starts);
     RUN_TEST(test_fall_back_day_25_intervals);
     RUN_TEST(test_fall_back_day_offset_starts);
+    RUN_TEST(test_sub_second_hull_does_not_loop);
+    RUN_TEST(test_event_extent_looping_span);
+    RUN_TEST(test_event_extent_hull_with_gap);
+    RUN_TEST(test_resolver_resolve_matches_next);
     return UNITY_END();
 }

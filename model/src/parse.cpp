@@ -6,7 +6,18 @@
 
 #include <ArduinoJson.h>
 
+#include <oa3/model/intervals.h>
 #include <oa3/model/time.h>
+
+// Inlined into parse_one, the window-fit locals stay live under copy_event and add about
+// 600 bytes to the deepest stack on xtensa.
+#if defined(__GNUC__)
+#define OA3_NOINLINE __attribute__((noinline))
+#elif defined(_MSC_VER)
+#define OA3_NOINLINE __declspec(noinline)
+#else
+#define OA3_NOINLINE
+#endif
 
 namespace oa3 {
 
@@ -22,6 +33,8 @@ const char* to_string(ParseResult r) {
             return "CAPACITY_EXCEEDED";
         case ParseResult::kInvalidField:
             return "INVALID_FIELD";
+        case ParseResult::kTruncated:
+            return "TRUNCATED";
     }
     return "UNKNOWN";
 }
@@ -710,6 +723,72 @@ ParseResult copy_values(JsonVariantConst v, Event* ev, Payload* p) {
     return ParseResult::kOk;
 }
 
+ParseResult copy_payloads(JsonVariantConst payloads, Event* ev, Interval* out, const ParseOptions* opt) {
+    out->payload_count = 0;
+    if (payloads.isNull()) {
+        return ParseResult::kOk;
+    }
+    if (!payloads.is<JsonArrayConst>()) {
+        return ParseResult::kInvalidField;
+    }
+    for (JsonVariantConst pv : payloads.as<JsonArrayConst>()) {
+        if (!pv.is<JsonObjectConst>()) {
+            return ParseResult::kInvalidField;
+        }
+        JsonVariantConst type = pv["type"];
+        if (!type.is<const char*>()) {
+            return ParseResult::kInvalidField;
+        }
+        if (!type_kept(opt, type.as<const char*>())) {
+            continue;
+        }
+        if (out->payload_count >= OA3_MAX_PAYLOADS) {
+            return ParseResult::kCapacityExceeded;
+        }
+        Payload* p = &out->payloads[out->payload_count];
+        OA3_TRY(copy_string(type, p->type, sizeof(p->type), true));
+        OA3_TRY(copy_values(pv["values"], ev, p));
+        ++out->payload_count;
+    }
+    return ParseResult::kOk;
+}
+
+// The resolved period becomes the interval's own, so it no longer depends on dropped ones.
+void make_explicit(const ResolvedInterval& r, Interval* out) {
+    IntervalPeriod& ip = out->interval_period;
+    out->has_interval_period = true;
+    ip.has_start = r.has_start;
+    ip.start = r.start;
+    ip.has_duration = r.has_duration;
+    ip.duration = r.duration;
+    ip.has_randomize_start = r.has_randomize_start;
+    ip.randomize_start = r.randomize_start;
+}
+
+const TimeInterval* window_of(const ParseOptions* opt) {
+    return opt != nullptr ? opt->window : nullptr;
+}
+
+bool window_inverted(const ParseOptions* opt) {
+    const TimeInterval* w = window_of(opt);
+    return w != nullptr && !w->end_indefinite && compare(w->end, w->start) < 0;
+}
+
+// False when the interval lies outside the window. Out of line so that the ResolvedInterval
+// is off the stack while payloads are copied.
+OA3_NOINLINE bool keep_in_window(const TimeInterval& window, bool dropped,
+                                 IntervalResolver* resolver, Interval* iv) {
+    ResolvedInterval r;
+    resolver->resolve(iv->has_interval_period ? &iv->interval_period : nullptr, iv->id, &r);
+    if (r.has_period && !intersects(r.period, window)) {
+        return false;
+    }
+    if (dropped) {
+        make_explicit(r, iv);
+    }
+    return true;
+}
+
 ParseResult copy_intervals(JsonVariantConst v, Event* ev, const ParseOptions* opt) {
     ev->interval_count = 0;
     ev->value_count = 0;
@@ -719,15 +798,25 @@ ParseResult copy_intervals(JsonVariantConst v, Event* ev, const ParseOptions* op
     if (!v.is<JsonArrayConst>()) {
         return ParseResult::kInvalidField;
     }
+    const TimeInterval* window = window_of(opt);
+    // An event duration may repeat the intervals, so none is outside the window on its own.
+    if (ev->has_duration) {
+        window = nullptr;
+    }
+    IntervalResolver resolver(ev->has_interval_period ? &ev->interval_period : nullptr);
+    bool dropped = false;
+    Interval spare;
     for (JsonVariantConst iv : v.as<JsonArrayConst>()) {
         if (!iv.is<JsonObjectConst>()) {
             return ParseResult::kInvalidField;
         }
-        if (ev->interval_count >= OA3_MAX_INTERVALS) {
+        const bool full = ev->interval_count >= OA3_MAX_INTERVALS;
+        if (full && window == nullptr) {
             return ParseResult::kCapacityExceeded;
         }
         JsonObjectConst o = iv.as<JsonObjectConst>();
-        Interval* out = &ev->intervals[ev->interval_count];
+        Interval* out = full ? &spare : &ev->intervals[ev->interval_count];
+        *out = Interval{};
         JsonVariantConst id = o["id"];
         if (!id.is<int32_t>()) {
             return ParseResult::kInvalidField;
@@ -735,32 +824,16 @@ ParseResult copy_intervals(JsonVariantConst v, Event* ev, const ParseOptions* op
         out->id = id.as<int32_t>();
         OA3_TRY(copy_period(get(o, "intervalPeriod", "interval_period"), &out->has_interval_period,
                             &out->interval_period));
-        out->payload_count = 0;
-        JsonVariantConst payloads = o["payloads"];
-        if (!payloads.isNull()) {
-            if (!payloads.is<JsonArrayConst>()) {
-                return ParseResult::kInvalidField;
+        if (window != nullptr) {
+            if (!keep_in_window(*window, dropped, &resolver, out)) {
+                dropped = true;
+                continue;
             }
-            for (JsonVariantConst pv : payloads.as<JsonArrayConst>()) {
-                if (!pv.is<JsonObjectConst>()) {
-                    return ParseResult::kInvalidField;
-                }
-                JsonVariantConst type = pv["type"];
-                if (!type.is<const char*>()) {
-                    return ParseResult::kInvalidField;
-                }
-                if (!type_kept(opt, type.as<const char*>())) {
-                    continue;
-                }
-                if (out->payload_count >= OA3_MAX_PAYLOADS) {
-                    return ParseResult::kCapacityExceeded;
-                }
-                Payload* p = &out->payloads[out->payload_count];
-                OA3_TRY(copy_string(type, p->type, sizeof(p->type), true));
-                OA3_TRY(copy_values(pv["values"], ev, p));
-                ++out->payload_count;
+            if (full) {
+                return ParseResult::kCapacityExceeded;
             }
         }
+        OA3_TRY(copy_payloads(o["payloads"], ev, out, opt));
         ++ev->interval_count;
     }
     return ParseResult::kOk;
@@ -883,8 +956,136 @@ ParseResult copy_notification(JsonVariantConst v, Notification* out, const Parse
 
 enum class Kind : uint8_t { kProgram, kEvent, kNotification };
 
+// Where an event meets the window: first is its earliest instant in the window.
+struct WindowFit {
+    bool in_window;
+    DateTime first;
+};
+
+class WindowFitBuilder {
+public:
+    explicit WindowFitBuilder(const TimeInterval& window) : _window(window), _hit(false), _first{} {}
+
+    void add(const ResolvedInterval& r) {
+        _extent.add(r);
+        if (r.has_period && intersects(r.period, _window) && (!_hit || compare(r.period.start, _first) < 0)) {
+            _hit = true;
+            _first = r.period.start;
+        }
+    }
+
+    // An event without a resolvable period is kept, and is the first to give way.
+    WindowFit finish(bool has_duration, const Duration& duration) const {
+        const EventExtent x = _extent.finish(has_duration, duration);
+        WindowFit f{true, DateTime{INT64_MAX, 0, 0}};
+        if (!x.has_period) {
+            return f;
+        }
+        if (x.looping) {
+            f.in_window = intersects(x.span, _window);
+            f.first = x.span.start;
+        } else {
+            f.in_window = _hit;
+            f.first = _first;
+        }
+        if (compare(f.first, _window.start) < 0) {
+            f.first = _window.start;
+        }
+        return f;
+    }
+
+private:
+    TimeInterval _window;
+    ExtentBuilder _extent;
+    bool _hit;
+    DateTime _first;
+};
+
+OA3_NOINLINE ParseResult fit_json(JsonObjectConst o, const TimeInterval& window, WindowFit* out) {
+    bool has_duration = false;
+    Duration duration{};
+    OA3_TRY(copy_duration(o["duration"], &has_duration, &duration));
+    bool has_period = false;
+    IntervalPeriod period{};
+    OA3_TRY(copy_period(get(o, "intervalPeriod", "interval_period"), &has_period, &period));
+    IntervalResolver resolver(has_period ? &period : nullptr);
+    WindowFitBuilder fit(window);
+    JsonVariantConst intervals = o["intervals"];
+    if (intervals.is<JsonArrayConst>()) {
+        for (JsonVariantConst iv : intervals.as<JsonArrayConst>()) {
+            bool has = false;
+            IntervalPeriod ip{};
+            OA3_TRY(copy_period(get(iv.as<JsonObjectConst>(), "intervalPeriod", "interval_period"), &has, &ip));
+            ResolvedInterval r;
+            resolver.resolve(has ? &ip : nullptr, 0, &r);
+            fit.add(r);
+        }
+    }
+    *out = fit.finish(has_duration, duration);
+    return ParseResult::kOk;
+}
+
+OA3_NOINLINE WindowFit fit_event(const Event& ev, const TimeInterval& window) {
+    WindowFitBuilder fit(window);
+    IntervalResolver resolver(ev);
+    ResolvedInterval r;
+    while (resolver.next(&r)) {
+        fit.add(r);
+    }
+    return fit.finish(ev.has_duration, ev.duration);
+}
+
+// parse_events with a window: the caller's array and whether an event was left out for room.
+struct EventSlots {
+    Event* events;
+    size_t capacity;
+    size_t* count;
+    bool truncated;
+};
+
+ParseResult place_event(JsonVariantConst v, EventSlots* slots, const ParseOptions* opt) {
+    if (!v.is<JsonObjectConst>()) {
+        return ParseResult::kInvalidField;
+    }
+    const TimeInterval& window = *opt->window;
+    WindowFit fit;
+    OA3_TRY(fit_json(v.as<JsonObjectConst>(), window, &fit));
+    if (!fit.in_window) {
+        return ParseResult::kOk;
+    }
+    size_t index = *slots->count;
+    if (index >= slots->capacity) {
+        slots->truncated = true;
+        size_t latest = 0;
+        DateTime latest_first{};
+        for (size_t i = 0; i < *slots->count; ++i) {
+            const WindowFit f = fit_event(slots->events[i], window);
+            if (i == 0 || compare(f.first, latest_first) > 0) {
+                latest = i;
+                latest_first = f.first;
+            }
+        }
+        if (*slots->count == 0 || compare(fit.first, latest_first) >= 0) {
+            return ParseResult::kOk;
+        }
+        // Closing the gap keeps the kept events in arrival order, which price_at's
+        // equal-priority tie-break depends on.
+        memmove(&slots->events[latest], &slots->events[latest + 1],
+                (*slots->count - 1 - latest) * sizeof(Event));
+        index = --*slots->count;
+    }
+    Event* slot = &slots->events[index];
+    memset(slot, 0, sizeof(*slot));
+    OA3_TRY(copy_event(v, slot, opt, nullptr));
+    ++*slots->count;
+    return ParseResult::kOk;
+}
+
 ParseResult parse_one(LiteralReader& reader, JsonArena& arena, Kind kind, void* out,
-                      const ParseOptions* opt) {
+                      const ParseOptions* opt, EventSlots* slots = nullptr) {
+    if (window_inverted(opt)) {
+        return ParseResult::kInvalidField;
+    }
     const Filters& f = filters();
     if (!f.ok) {
         return ParseResult::kTooLarge;
@@ -898,6 +1099,9 @@ ParseResult parse_one(LiteralReader& reader, JsonArena& arena, Kind kind, void* 
     ParseResult r = map_error(e, arena);
     if (r != ParseResult::kOk) {
         return r;
+    }
+    if (slots != nullptr) {
+        return place_event(doc.as<JsonVariantConst>(), slots, opt);
     }
     switch (kind) {
         case Kind::kProgram:
@@ -925,6 +1129,11 @@ int next_non_space(LiteralReader& reader) {
 ParseResult parse_array(ByteReader& in, JsonArena& arena, Kind kind, void* out, size_t stride,
                         size_t capacity, size_t* count, const ParseOptions* opt) {
     *count = 0;
+    if (window_inverted(opt)) {
+        return ParseResult::kInvalidField;
+    }
+    const bool windowed = kind == Kind::kEvent && window_of(opt) != nullptr;
+    EventSlots slots{static_cast<Event*>(out), capacity, count, false};
     LiteralReader reader(in);
     int c = next_non_space(reader);
     if (c != '[') {
@@ -941,20 +1150,27 @@ ParseResult parse_array(ByteReader& in, JsonArena& arena, Kind kind, void* out, 
         if (c != '{') {
             return ParseResult::kInvalidField;
         }
-        if (*count >= capacity) {
-            return ParseResult::kCapacityExceeded;
-        }
         reader.unread(c);
-        void* item = static_cast<unsigned char*>(out) + *count * stride;
-        memset(item, 0, stride);
-        ParseResult r = parse_one(reader, arena, kind, item, opt);
+        ParseResult r;
+        if (windowed) {
+            r = parse_one(reader, arena, kind, nullptr, opt, &slots);
+        } else {
+            if (*count >= capacity) {
+                return ParseResult::kCapacityExceeded;
+            }
+            void* item = static_cast<unsigned char*>(out) + *count * stride;
+            memset(item, 0, stride);
+            r = parse_one(reader, arena, kind, item, opt);
+            if (r == ParseResult::kOk) {
+                ++*count;
+            }
+        }
         if (r != ParseResult::kOk) {
             return r;
         }
-        ++*count;
         c = next_non_space(reader);
         if (c == ']') {
-            return ParseResult::kOk;
+            return slots.truncated ? ParseResult::kTruncated : ParseResult::kOk;
         }
         if (c != ',') {
             return ParseResult::kJsonError;

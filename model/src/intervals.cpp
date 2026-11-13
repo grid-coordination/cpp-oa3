@@ -7,23 +7,28 @@ namespace oa3 {
 
 namespace {
 
-constexpr int64_t kNoEnd = INT64_MAX;
-
-int64_t end_of(const DateTime& start, const Duration& d) {
-    DateTime end;
-    if (!add(start, d, &end)) return kNoEnd;
-    return to_unix(end);
-}
+// 0001-01-01T00:00:00Z
+constexpr int64_t kSequentialSentinel = -62135596800LL;
 
 bool is_sequential_sentinel(const DateTime& dt) {
-    return dt.year == 1 && dt.month == 1 && dt.day == 1 && dt.hour == 0 && dt.minute == 0 &&
-           dt.second == 0 && dt.nanos == 0;
+    return dt.seconds == kSequentialSentinel && dt.nanos == 0;
 }
 
 }  // namespace
 
 IntervalResolver::IntervalResolver(const Event& event)
     : _event(&event),
+      _event_period(event.has_interval_period ? &event.interval_period : nullptr),
+      _next(0),
+      _has_accumulated(false),
+      _accumulated{},
+      _has_prev(false),
+      _prev_start{},
+      _prev_duration{} {}
+
+IntervalResolver::IntervalResolver(const IntervalPeriod* event_period)
+    : _event(nullptr),
+      _event_period(event_period),
       _next(0),
       _has_accumulated(false),
       _accumulated{},
@@ -41,15 +46,20 @@ void IntervalResolver::reset() {
 }
 
 bool IntervalResolver::next(ResolvedInterval* out) {
+    if (_event == nullptr) return false;
     const Event& ev = *_event;
     if (_next >= ev.interval_count || _next >= OA3_MAX_INTERVALS) return false;
     const Interval& iv = ev.intervals[_next];
-    const IntervalPeriod* ip = iv.has_interval_period ? &iv.interval_period : nullptr;
-    const IntervalPeriod* eip = ev.has_interval_period ? &ev.interval_period : nullptr;
+    resolve(iv.has_interval_period ? &iv.interval_period : nullptr, iv.id, out);
+    return true;
+}
+
+void IntervalResolver::resolve(const IntervalPeriod* ip, int32_t id, ResolvedInterval* out) {
+    const IntervalPeriod* eip = _event_period;
 
     ResolvedInterval r{};
     r.index = _next;
-    r.id = iv.id;
+    r.id = id;
 
     if (ip && ip->has_duration) {
         r.has_duration = true;
@@ -85,11 +95,7 @@ bool IntervalResolver::next(ResolvedInterval* out) {
         r.randomize_start = eip->randomize_start;
     }
 
-    if (r.has_start && r.has_duration) {
-        r.has_period = true;
-        r.start_unix = to_unix(r.start);
-        r.end_unix = end_of(r.start, r.duration);
-    }
+    r.has_period = r.has_start && r.has_duration && make_interval(r.start, r.duration, &r.period);
 
     if (r.has_duration) {
         if (!_has_accumulated) {
@@ -110,7 +116,6 @@ bool IntervalResolver::next(ResolvedInterval* out) {
 
     ++_next;
     *out = r;
-    return true;
 }
 
 size_t resolve_intervals(const Event& event, ResolvedInterval* out, size_t capacity) {
@@ -118,6 +123,70 @@ size_t resolve_intervals(const Event& event, ResolvedInterval* out, size_t capac
     size_t n = 0;
     while (n < capacity && resolver.next(&out[n])) ++n;
     return n;
+}
+
+ExtentBuilder::ExtentBuilder() : _any(false), _all_periods(true), _first_start{}, _hull{} {}
+
+void ExtentBuilder::add(const ResolvedInterval& r) {
+    if (!r.has_period) {
+        _all_periods = false;
+        return;
+    }
+    if (!_any) {
+        _any = true;
+        _first_start = r.period.start;
+        _hull = r.period;
+        return;
+    }
+    switch (allen_relation(r.period, _hull)) {
+        case AllenRelation::kBefore:
+        case AllenRelation::kMeets:
+        case AllenRelation::kOverlaps:
+        case AllenRelation::kFinishedBy:
+        case AllenRelation::kContains:
+            _hull.start = r.period.start;
+            break;
+        default:
+            break;
+    }
+    switch (allen_relation(r.period, _hull)) {
+        case AllenRelation::kAfter:
+        case AllenRelation::kMetBy:
+        case AllenRelation::kOverlappedBy:
+        case AllenRelation::kStartedBy:
+        case AllenRelation::kContains:
+            _hull.end = r.period.end;
+            _hull.end_indefinite = r.period.end_indefinite;
+            break;
+        default:
+            break;
+    }
+}
+
+EventExtent ExtentBuilder::finish(bool has_duration, const Duration& duration) const {
+    EventExtent x{};
+    x.has_period = _any;
+    x.hull = _hull;
+    x.span = _hull;
+    // price_at shifts by whole seconds, so a hull shorter than one second cannot loop.
+    if (!_any || !_all_periods || !has_duration || _hull.end_indefinite ||
+        to_unix(_hull.end) - to_unix(_hull.start) <= 0) {
+        return x;
+    }
+    TimeInterval bound;
+    if (!make_interval(_first_start, duration, &bound)) return x;
+    x.looping = true;
+    x.span.end = bound.end;
+    x.span.end_indefinite = bound.end_indefinite;
+    return x;
+}
+
+EventExtent event_extent(const Event& event) {
+    ExtentBuilder builder;
+    IntervalResolver resolver(event);
+    ResolvedInterval r;
+    while (resolver.next(&r)) builder.add(r);
+    return builder.finish(event.has_duration, event.duration);
 }
 
 bool is_unitary_payload_type(const char* type) {
@@ -128,49 +197,26 @@ bool is_unitary_payload_type(const char* type) {
 
 namespace {
 
-// How an event's spans repeat in time (User_Guide 7.3 "event.duration").
-struct Loop {
-    bool looping;
-    int64_t origin;  // S, the earliest start
-    int64_t cycle;   // C, latest end minus S
-    int64_t end;     // span end, kNoEnd when indefinite
-};
-
-Loop event_loop(const Event& ev) {
-    Loop loop{false, 0, 0, kNoEnd};
-    if (!ev.has_duration || is_negative(ev.duration)) return loop;
-
-    IntervalResolver resolver(ev);
-    ResolvedInterval r;
-    bool any = false;
-    int64_t earliest = 0;
-    int64_t latest = 0;
-    DateTime first_start{};
-    while (resolver.next(&r)) {
-        if (!r.has_period) return loop;
-        if (!any) {
-            first_start = r.start;
-            earliest = r.start_unix;
-            latest = r.end_unix;
-            any = true;
-        } else {
-            if (r.start_unix < earliest) earliest = r.start_unix;
-            if (r.end_unix > latest) latest = r.end_unix;
-        }
-    }
-    if (!any || latest == kNoEnd || latest <= earliest) return loop;
-
-    loop.looping = true;
-    loop.origin = earliest;
-    loop.cycle = latest - earliest;
-    loop.end = is_indefinite(ev.duration) ? kNoEnd : end_of(first_start, ev.duration);
-    return loop;
-}
-
 int64_t floor_div(int64_t a, int64_t b) {
     int64_t q = a / b;
     if ((a % b != 0) && ((a < 0) != (b < 0))) --q;
     return q;
+}
+
+DateTime later_by(DateTime t, int64_t seconds) {
+    t.seconds += seconds;
+    return t;
+}
+
+TimeInterval shifted(const TimeInterval& iv, int64_t seconds) {
+    TimeInterval r = iv;
+    r.start = later_by(iv.start, seconds);
+    if (!r.end_indefinite) r.end = later_by(iv.end, seconds);
+    return r;
+}
+
+bool is_empty(const TimeInterval& iv) {
+    return !iv.end_indefinite && compare(iv.start, iv.end) >= 0;
 }
 
 const Payload* payload_of(const Interval& iv, const char* type) {
@@ -187,39 +233,40 @@ bool outranks(const Event& a, const Event& b) {
     return a.has_priority && a.priority < b.priority;
 }
 
-void consider_boundary(int64_t t, int64_t now, PriceAt* out) {
-    if (t <= now || t == kNoEnd) return;
-    if (!out->has_next_change || t < out->next_change_unix) {
+void consider_boundary(const DateTime& t, const DateTime& now, PriceAt* out) {
+    if (compare(t, now) <= 0) return;
+    if (!out->has_next_change || compare(t, out->next_change) < 0) {
         out->has_next_change = true;
-        out->next_change_unix = t;
+        out->next_change = t;
     }
 }
 
 }  // namespace
 
-bool price_at(const Event* events, size_t event_count, int64_t now_unix,
+bool price_at(const Event* events, size_t event_count, const DateTime& now,
               const char* payload_type, PriceAt* out) {
     *out = PriceAt{};
     if (!events || !payload_type) return false;
+    const bool unitary = is_unitary_payload_type(payload_type);
 
     for (size_t e = 0; e < event_count; ++e) {
         const Event& ev = events[e];
-        const Loop loop = event_loop(ev);
+        const EventExtent extent = event_extent(ev);
 
+        int64_t cycle = 0;
         int64_t k_first = 0;
         int64_t k_last = 0;
-        if (loop.looping) {
-            int64_t k_now = now_unix < loop.origin
-                                ? 0
-                                : floor_div(now_unix - loop.origin, loop.cycle);
-            k_first = k_now;
-            k_last = k_now + 1;
+        if (extent.looping) {
+            cycle = to_unix(extent.hull.end) - to_unix(extent.hull.start);
+            const int64_t since = to_unix(now) - to_unix(extent.hull.start);
+            k_first = since < 0 ? 0 : floor_div(since, cycle);
+            k_last = k_first + 1;
         }
 
         IntervalResolver resolver(ev);
         ResolvedInterval r;
         while (resolver.next(&r)) {
-            if (!r.has_period || r.end_unix <= r.start_unix) continue;
+            if (!r.has_period || is_empty(r.period)) continue;
             const Payload* p = payload_of(ev.intervals[r.index], payload_type);
             if (!p || p->value_count == 0 || p->first_value >= ev.value_count) continue;
             uint16_t n = p->value_count;
@@ -227,40 +274,50 @@ bool price_at(const Event* events, size_t event_count, int64_t now_unix,
                 n = static_cast<uint16_t>(ev.value_count - p->first_value);
             }
 
-            const bool unitary = is_unitary_payload_type(payload_type);
-            const uint16_t subs = unitary ? n : 1;
-            const int64_t width = (r.end_unix - r.start_unix) / subs;
+            const uint16_t subs = unitary && !r.period.end_indefinite ? n : 1;
+            const int64_t width =
+                r.period.end_indefinite ? 0 : (to_unix(r.period.end) - to_unix(r.period.start)) / subs;
 
             for (uint16_t s = 0; s < subs; ++s) {
-                const int64_t base_start = r.start_unix + width * s;
-                const int64_t base_end = (s + 1 == subs) ? r.end_unix : base_start + width;
-                if (base_end <= base_start) continue;
+                TimeInterval sub = r.period;
+                sub.start = later_by(r.period.start, width * s);
+                if (s + 1 < subs) sub.end = later_by(sub.start, width);
+                if (is_empty(sub)) continue;
 
                 for (int64_t k = k_first; k <= k_last; ++k) {
-                    const int64_t shift = loop.looping ? k * loop.cycle : 0;
-                    const int64_t start = base_start + shift;
-                    if (start >= loop.end) continue;
-                    int64_t end = base_end + shift;
-                    if (end > loop.end) end = loop.end;
-
-                    consider_boundary(start, now_unix, out);
-                    consider_boundary(end, now_unix, out);
-
-                    if (start > now_unix || now_unix >= end) continue;
-                    if (out->active) {
-                        const Event& cur = *out->event;
-                        // Iteration order is event index then interval index, so only a
-                        // strictly better priority replaces the incumbent.
-                        if (!outranks(ev, cur)) continue;
+                    TimeInterval span = extent.looping ? shifted(sub, k * cycle) : sub;
+                    if (extent.looping) {
+                        switch (allen_relation(span, extent.span)) {
+                            case AllenRelation::kBefore:
+                            case AllenRelation::kMeets:
+                            case AllenRelation::kMetBy:
+                            case AllenRelation::kAfter:
+                                continue;
+                            case AllenRelation::kOverlappedBy:
+                            case AllenRelation::kStartedBy:
+                            case AllenRelation::kContains:
+                                span.end = extent.span.end;
+                                span.end_indefinite = extent.span.end_indefinite;
+                                break;
+                            default:
+                                break;
+                        }
                     }
+
+                    consider_boundary(span.start, now, out);
+                    if (!span.end_indefinite) consider_boundary(span.end, now, out);
+
+                    if (!contains_instant(span, now)) continue;
+                    // Iteration order is event index then interval index, so only a strictly
+                    // better priority replaces the incumbent.
+                    if (out->active && !outranks(ev, *out->event)) continue;
                     out->active = true;
                     out->event = &ev;
                     out->interval_index = r.index;
                     out->value_index = unitary ? s : 0;
                     out->value = &ev.values[p->first_value + out->value_index];
                     out->value_count = unitary ? 1 : n;
-                    out->start_unix = start;
-                    out->end_unix = end;
+                    out->span = span;
                 }
             }
         }
@@ -268,9 +325,14 @@ bool price_at(const Event* events, size_t event_count, int64_t now_unix,
     return out->active;
 }
 
-bool price_at(const Event* events, size_t event_count, const DateTime& now,
+bool price_at(const Event* events, size_t event_count, int64_t now_unix,
               const char* payload_type, PriceAt* out) {
-    return price_at(events, event_count, to_unix(now), payload_type, out);
+    DateTime now{};
+    if (!from_unix(now_unix, &now)) {
+        *out = PriceAt{};
+        return false;
+    }
+    return price_at(events, event_count, now, payload_type, out);
 }
 
 }  // namespace oa3

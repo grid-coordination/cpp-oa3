@@ -20,11 +20,13 @@ static_assert(OA3_MAX_VALUES <= 65535, "Event::value_count is uint16_t");
 enum class ValueKind : uint8_t { kNumber, kString, kBool, kPoint };
 
 struct Value {
+    double number;  // kNumber; kPoint: x
+    union {
+        double y;                           // kPoint
+        char text[OA3_VALUE_TEXT_MAX + 1];  // kNumber: the literal exactly as on the wire; kString
+    };
     ValueKind kind;
     bool boolean;
-    double number;  // kNumber; kPoint: x
-    double y;       // kPoint
-    char text[OA3_VALUE_TEXT_MAX + 1];  // kNumber: the literal exactly as on the wire; kString
 };
 
 // A valuesMap. Its values are event.values[first_value .. first_value + value_count).

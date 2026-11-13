@@ -112,8 +112,8 @@ static void test_python_program() {
     TEST_ASSERT_EQUAL_STRING("KWH", program.descriptors[0].units);
     TEST_ASSERT_EQUAL_STRING("USD", program.descriptors[0].currency);
     TEST_ASSERT_TRUE(program.has_modification_date_time);
-    TEST_ASSERT_EQUAL_INT(2024, program.modification_date_time.year);
-    TEST_ASSERT_EQUAL_UINT8(12, program.modification_date_time.hour);
+    TEST_ASSERT_EQUAL_INT(2024, oa3::to_civil(program.modification_date_time).year);
+    TEST_ASSERT_EQUAL_UINT8(12, oa3::to_civil(program.modification_date_time).hour);
     TEST_ASSERT_FALSE(program.local);
 }
 
@@ -129,7 +129,7 @@ static void test_python_event() {
     TEST_ASSERT_EQUAL_INT32(2, event.duration.hours);
     TEST_ASSERT_TRUE(event.has_interval_period);
     TEST_ASSERT_TRUE(event.interval_period.has_start);
-    TEST_ASSERT_EQUAL_UINT8(14, event.interval_period.start.hour);
+    TEST_ASSERT_EQUAL_UINT8(14, oa3::to_civil(event.interval_period.start).hour);
     TEST_ASSERT_EQUAL_UINT8(1, event.targets.count);
     TEST_ASSERT_EQUAL_UINT8(1, event.descriptor_count);
     TEST_ASSERT_EQUAL_STRING("PRICE", event.descriptors[0].payload_type);
@@ -316,8 +316,8 @@ static void test_price_server_events() {
     const oa3::Event& first = events[0];
     TEST_ASSERT_EQUAL_STRING("66f13cb2-7aff-3a38-a20c-9e8eb508e678", first.id);
     TEST_ASSERT_EQUAL_UINT32(621411877, first.modification_date_time.nanos);
-    TEST_ASSERT_EQUAL_UINT8(8, first.interval_period.start.hour);
-    TEST_ASSERT_EQUAL_UINT8(14, first.interval_period.start.day);
+    TEST_ASSERT_EQUAL_UINT8(8, oa3::to_civil(first.interval_period.start).hour);
+    TEST_ASSERT_EQUAL_UINT8(14, oa3::to_civil(first.interval_period.start).day);
     const oa3::Payload* p = oa3::find_payload(first.intervals[0], "PRICE");
     TEST_ASSERT_NOT_NULL(p);
     const oa3::Value* v = oa3::payload_value(first, *p, 0);
@@ -428,15 +428,15 @@ static void test_value_kinds() {
 
 static void test_values_whitespace_and_escapes() {
     const char* json = "{\n \"programID\" : \"p\" ,\n \"intervals\" : [ {\n  \"payloads\" : [ {"
-                       " \"type\" : \"A\\\"\" , \"values\" : [ 0.25 ,\t1\n] } , {\"values\": [ 7 ],"
-                       " \"type\": \"B\"} ],\"id\" : 3 } ]\n}";
+                       " \"type\" : \"A\\\"\" , \"values\" : [ 0.25 ,\t1\n] } ],\"id\" : 3 } , {\"payloads\": [ "
+                       "{\"values\": [ 7 ], \"type\": \"B\"} ], \"id\": 4 } ]\n}";
     ASSERT_RESULT(ParseResult::kOk, event_from(json));
     TEST_ASSERT_EQUAL_INT32(3, event.intervals[0].id);
     TEST_ASSERT_EQUAL_STRING("A\"", event.intervals[0].payloads[0].type);
     TEST_ASSERT_EQUAL_STRING("0.25", event.values[0].text);
     TEST_ASSERT_EQUAL_STRING("1", event.values[1].text);
-    TEST_ASSERT_EQUAL_STRING("B", event.intervals[0].payloads[1].type);
-    TEST_ASSERT_EQUAL_UINT16(2, event.intervals[0].payloads[1].first_value);
+    TEST_ASSERT_EQUAL_STRING("B", event.intervals[1].payloads[0].type);
+    TEST_ASSERT_EQUAL_UINT16(2, event.intervals[1].payloads[0].first_value);
     TEST_ASSERT_EQUAL_STRING("7", event.values[2].text);
 }
 
@@ -544,7 +544,9 @@ static void test_event_snake_case() {
     TEST_ASSERT_EQUAL_STRING("p", event.program_id);
     TEST_ASSERT_EQUAL_STRING("Snake", event.event_name);
     TEST_ASSERT_TRUE(event.has_modification_date_time);
-    TEST_ASSERT_TRUE(event.modification_date_time.zone == oa3::ZoneForm::kNone);
+    char buf[oa3::kDateTimeStringSize];
+    oa3::format_datetime(event.modification_date_time, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("2026-03-08T19:22:06Z", buf);
     TEST_ASSERT_TRUE(event.has_interval_period);
     TEST_ASSERT_EQUAL_UINT8(1, event.descriptor_count);
     TEST_ASSERT_EQUAL_STRING("PRICE", event.descriptors[0].payload_type);
@@ -581,7 +583,7 @@ static void test_targets() {
 
 static void test_payload_filter() {
     const char* types[] = {"EXPORT_PRICE"};
-    oa3::ParseOptions opt = {types, 1};
+    oa3::ParseOptions opt = {types, 1, nullptr};
     const char* json = R"({"programID":"p",
       "payloadDescriptors":[{"payloadType":"PRICE"},{"payloadType":"EXPORT_PRICE","units":"KWH"},
                             {"payloadType":"GHG"},{"payloadType":"X"},{"payloadType":"Y"}],
@@ -669,8 +671,8 @@ static void test_entities_helpers() {
 
 static void test_number_literals() {
     ASSERT_RESULT(ParseResult::kOk, event_from(R"({"programID":"p","intervals":[{"id":0,"payloads":[
-      {"type":"A","values":[0.1, 0.050294, -0, 1E2, 3.141592653589793, 12345678901234567890123, 1e400, 5e-400]},
-      {"type":"B","values":[{"x":0.050294,"y":1e-3}]}]}]})"));
+      {"type":"A","values":[0.1, 0.050294, -0, 1E2, 3.141592653589793, 12345678901234567890123, 1e400, 5e-400]}]},
+      {"id":1,"payloads":[{"type":"B","values":[{"x":0.050294,"y":1e-3}]}]}]})"));
     TEST_ASSERT_TRUE(event.values[0].number == 0.1);
     TEST_ASSERT_TRUE(event.values[1].number == 0.050294);
     TEST_ASSERT_TRUE(event.values[2].number == 0.0);
@@ -708,7 +710,7 @@ static void test_marker_bytes_in_strings() {
     long_ones[200] = '\0';
     size_t n = static_cast<size_t>(snprintf(scratch, sizeof(scratch),
         "{\"programID\":\"p\",\"intervals\":[{\"id\":0,\"payloads\":[{\"type\":\"X\",\"values\":["));
-    for (int i = 0; i < 49; ++i) {
+    for (int i = 0; i < OA3_MAX_VALUES - 1; ++i) {
         n += static_cast<size_t>(snprintf(scratch + n, sizeof(scratch) - n, "%d,", i));
     }
     snprintf(scratch + n, sizeof(scratch) - n, "\"\\u0001%s\"]}]}]}", long_ones);
@@ -747,9 +749,20 @@ static void test_blank_datetime_and_duration_absent() {
     ASSERT_RESULT(ParseResult::kInvalidField, event_from(R"({"programID":"p","modificationDateTime":42})"));
 }
 
-// Every field at its OA3_* limit: 63-character ids and name, 4 targets of 47, 4 descriptors,
-// 25 intervals of 2 payloads, 50 values of 23 characters.
+// Every field at its OA3_* limit: ids and name of OA3_ID_MAX, OA3_MAX_TARGETS targets of
+// OA3_TARGET_MAX, OA3_MAX_DESCRIPTORS descriptors, OA3_MAX_INTERVALS intervals of
+// OA3_MAX_PAYLOADS payloads, and OA3_MAX_VALUES values of OA3_VALUE_TEXT_MAX characters.
 static void test_event_at_every_limit() {
+    static const char* const kTypes[] = {"PRICE", "GHG", "EXPORT_PRICE", "SIMPLE"};
+    static_assert(OA3_MAX_PAYLOADS <= 4 && OA3_MAX_DESCRIPTORS <= 4, "kTypes");
+    const int slots = OA3_MAX_INTERVALS * OA3_MAX_PAYLOADS;
+    static_assert(OA3_MAX_VALUES >= OA3_MAX_INTERVALS * OA3_MAX_PAYLOADS, "one value per payload");
+    char literal[OA3_VALUE_TEXT_MAX + 1];
+    memset(literal, '1', sizeof(literal) - 1);
+    literal[0] = '0';
+    literal[1] = '.';
+    literal[OA3_VALUE_TEXT_MAX] = '\0';
+
     const char* id63 = "id-012345678901234567890123456789012345678901234567890123456789";
     const char* t47 = "0123456789012345678901234567890123456789012345";
     TEST_ASSERT_EQUAL_size_t(OA3_ID_MAX, strlen(id63));
@@ -758,31 +771,239 @@ static void test_event_at_every_limit() {
         "{\"id\":\"%s\",\"programID\":\"%s\",\"eventName\":\"%s\",\"objectType\":\"EVENT\","
         "\"priority\":0,\"duration\":\"PT25H\",\"modificationDateTime\":\"2026-11-01T00:00:00.123456789Z\","
         "\"intervalPeriod\":{\"start\":\"2026-11-01T07:00:00Z\",\"duration\":\"PT1H\",\"randomizeStart\":\"PT5M\"},"
-        "\"targets\":[\"%sa\",\"%sb\",\"%sc\",\"%sd\"],\"payloadDescriptors\":["
-        "{\"objectType\":\"EVENT_PAYLOAD_DESCRIPTOR\",\"payloadType\":\"PRICE\",\"units\":\"KWH\",\"currency\":\"USD\"},"
-        "{\"objectType\":\"EVENT_PAYLOAD_DESCRIPTOR\",\"payloadType\":\"GHG\",\"units\":\"G_PER_KWH\"},"
-        "{\"objectType\":\"EVENT_PAYLOAD_DESCRIPTOR\",\"payloadType\":\"EXPORT_PRICE\",\"units\":\"KWH\",\"currency\":\"USD\"},"
-        "{\"objectType\":\"EVENT_PAYLOAD_DESCRIPTOR\",\"payloadType\":\"SIMPLE\"}],\"intervals\":[",
+        "\"targets\":[\"%sa\",\"%sb\",\"%sc\",\"%sd\"],\"payloadDescriptors\":[",
         id63, id63, id63, t47, t47, t47, t47));
+    for (int d = 0; d < OA3_MAX_DESCRIPTORS; ++d) {
+        n += static_cast<size_t>(snprintf(scratch + n, sizeof(scratch) - n,
+            "%s{\"objectType\":\"EVENT_PAYLOAD_DESCRIPTOR\",\"payloadType\":\"%s\",\"units\":\"KWH\",\"currency\":\"USD\"}",
+            d ? "," : "", kTypes[d]));
+    }
+    n += static_cast<size_t>(snprintf(scratch + n, sizeof(scratch) - n, "],\"intervals\":["));
     for (int i = 0; i < OA3_MAX_INTERVALS; ++i) {
         n += static_cast<size_t>(snprintf(scratch + n, sizeof(scratch) - n,
             "%s{\"id\":%d,\"intervalPeriod\":{\"start\":\"2026-11-01T%02d:00:00.000000000-07:00\","
-            "\"duration\":\"PT1H\",\"randomizeStart\":\"PT1M\"},\"payloads\":["
-            "{\"type\":\"PRICE\",\"values\":[0.1234567890123456789%02d]},"
-            "{\"type\":\"GHG\",\"values\":[300.00000000000000000%02d]}]}",
-            i ? "," : "", i, i % 24, i, i));
+            "\"duration\":\"PT1H\",\"randomizeStart\":\"PT1M\"},\"payloads\":[",
+            i ? "," : "", i, i % 24));
+        for (int p = 0; p < OA3_MAX_PAYLOADS; ++p) {
+            // The last payload takes the values left over after one per payload.
+            const int slot = i * OA3_MAX_PAYLOADS + p;
+            const int values = slot + 1 == slots ? OA3_MAX_VALUES - slots + 1 : 1;
+            n += static_cast<size_t>(snprintf(scratch + n, sizeof(scratch) - n,
+                                              "%s{\"type\":\"%s\",\"values\":[", p ? "," : "", kTypes[p]));
+            for (int v = 0; v < values; ++v) {
+                n += static_cast<size_t>(snprintf(scratch + n, sizeof(scratch) - n, "%s%s", v ? "," : "", literal));
+            }
+            n += static_cast<size_t>(snprintf(scratch + n, sizeof(scratch) - n, "]}"));
+        }
+        n += static_cast<size_t>(snprintf(scratch + n, sizeof(scratch) - n, "]}"));
     }
     snprintf(scratch + n, sizeof(scratch) - n, "]}");
+    TEST_ASSERT_TRUE(n + 3 < sizeof(scratch));
     ASSERT_RESULT(ParseResult::kOk, event_from(scratch));
     TEST_ASSERT_EQUAL_UINT16(OA3_MAX_INTERVALS, event.interval_count);
     TEST_ASSERT_EQUAL_UINT16(OA3_MAX_VALUES, event.value_count);
-    TEST_ASSERT_EQUAL_size_t(OA3_VALUE_TEXT_MAX, strlen(event.values[49].text));
+    TEST_ASSERT_EQUAL_STRING(literal, event.values[OA3_MAX_VALUES - 1].text);
     TEST_ASSERT_EQUAL_UINT8(OA3_MAX_TARGETS, event.targets.count);
     TEST_ASSERT_EQUAL_UINT8(OA3_MAX_DESCRIPTORS, event.descriptor_count);
     char msg[96];
     snprintf(msg, sizeof(msg), "at-limit event arena high water: %u of %u bytes",
              static_cast<unsigned>(arena.high_water()), static_cast<unsigned>(arena.capacity()));
     TEST_MESSAGE(msg);
+}
+
+static oa3::TimeInterval window_of(const char* start, const char* duration) {
+    oa3::DateTime s{};
+    oa3::Duration d{};
+    oa3::TimeInterval w{};
+    TEST_ASSERT_TRUE(oa3::parse_datetime(start, &s));
+    TEST_ASSERT_TRUE(oa3::parse_duration(duration, &d));
+    TEST_ASSERT_TRUE(oa3::make_interval(s, d, &w));
+    return w;
+}
+
+// The fixture holds 11-14, 11-13 and 11-12, each 24 hourly intervals from 08:00Z.
+static void test_window_keeps_overlapping_events_and_intervals() {
+    size_t n = load_fixture(OA3_FIXTURE_DIR "/price_server_events.json");
+    const oa3::TimeInterval window = window_of("2026-11-13T20:00:00Z", "PT24H");
+    oa3::ParseOptions opt = {nullptr, 0, &window};
+    size_t count = 0;
+    ASSERT_RESULT(ParseResult::kOk, oa3::parse_events(fixture, n, arena, events, 2, &count, &opt));
+    TEST_ASSERT_EQUAL_size_t(2, count);
+    TEST_ASSERT_EQUAL_STRING("EELEC-013532223-2026-11-14", events[0].event_name);
+    TEST_ASSERT_EQUAL_STRING("EELEC-013532223-2026-11-13", events[1].event_name);
+    TEST_ASSERT_EQUAL_UINT16(12, events[0].interval_count);
+    TEST_ASSERT_EQUAL_UINT16(12, events[0].value_count);
+    TEST_ASSERT_EQUAL_INT32(11, events[0].intervals[11].id);
+    TEST_ASSERT_EQUAL_UINT16(12, events[1].interval_count);
+    TEST_ASSERT_EQUAL_UINT16(12, events[1].value_count);
+    TEST_ASSERT_EQUAL_INT32(12, events[1].intervals[0].id);
+    TEST_ASSERT_EQUAL_UINT16(0, events[1].intervals[0].payloads[0].first_value);
+    TEST_ASSERT_EQUAL_STRING("0.050808", events[1].values[11].text);
+
+    oa3::PriceAt p;
+    TEST_ASSERT_TRUE(oa3::price_at(events, count, ux("2026-11-13T20:30:00Z"), "PRICE", &p));
+    TEST_ASSERT_EQUAL_PTR(&events[1], p.event);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-13T20:00:00Z"), oa3::to_unix(p.span.start));
+    TEST_ASSERT_TRUE(oa3::price_at(events, count, ux("2026-11-14T19:59:59Z"), "PRICE", &p));
+    TEST_ASSERT_EQUAL_PTR(&events[0], p.event);
+    TEST_ASSERT_EQUAL_UINT16(11, p.interval_index);
+    TEST_ASSERT_FALSE(oa3::price_at(events, count, ux("2026-11-14T20:00:00Z"), "PRICE", &p));
+
+    const oa3::TimeInterval none = window_of("2026-11-20T00:00:00Z", "PT24H");
+    opt.window = &none;
+    ASSERT_RESULT(ParseResult::kOk, oa3::parse_events(fixture, n, arena, events, 2, &count, &opt));
+    TEST_ASSERT_EQUAL_size_t(0, count);
+}
+
+static void test_window_truncates_to_earliest() {
+    size_t n = load_fixture(OA3_FIXTURE_DIR "/price_server_events.json");
+    const oa3::TimeInterval window = window_of("2026-11-13T20:00:00Z", "PT24H");
+    oa3::ParseOptions opt = {nullptr, 0, &window};
+    size_t count = 0;
+    ASSERT_RESULT(ParseResult::kTruncated, oa3::parse_events(fixture, n, arena, events, 1, &count, &opt));
+    TEST_ASSERT_EQUAL_size_t(1, count);
+    TEST_ASSERT_EQUAL_STRING("EELEC-013532223-2026-11-13", events[0].event_name);
+    TEST_ASSERT_EQUAL_UINT16(12, events[0].interval_count);
+
+    const oa3::TimeInterval three_days = window_of("2026-11-12T08:00:00Z", "PT72H");
+    opt.window = &three_days;
+    ASSERT_RESULT(ParseResult::kTruncated, oa3::parse_events(fixture, n, arena, events, 2, &count, &opt));
+    TEST_ASSERT_EQUAL_size_t(2, count);
+    TEST_ASSERT_EQUAL_STRING("EELEC-013532223-2026-11-13", events[0].event_name);
+    TEST_ASSERT_EQUAL_STRING("EELEC-013532223-2026-11-12", events[1].event_name);
+    TEST_ASSERT_EQUAL_UINT16(24, events[1].interval_count);
+
+    ASSERT_RESULT(ParseResult::kTruncated, oa3::parse_events(fixture, n, arena, events, 0, &count, &opt));
+    TEST_ASSERT_EQUAL_size_t(0, count);
+}
+
+// Eviction keeps arrival order, so price_at's equal-priority tie-break does not depend on
+// the capacity.
+static void test_window_eviction_keeps_arrival_order() {
+    const oa3::TimeInterval window = window_of("2027-01-01T00:00:00Z", "PT48H");
+    oa3::ParseOptions opt = {nullptr, 0, &window};
+    const char* json = R"([
+      {"programID":"L","intervals":[{"id":0,"intervalPeriod":{"start":"2027-01-02T06:00:00Z","duration":"PT1H"},"payloads":[{"type":"PRICE","values":[9]}]}]},
+      {"programID":"A","intervals":[{"id":0,"intervalPeriod":{"start":"2027-01-01T10:00:00Z","duration":"PT10H"},"payloads":[{"type":"PRICE","values":[1]}]}]},
+      {"programID":"B","intervals":[{"id":0,"intervalPeriod":{"start":"2027-01-01T10:00:00Z","duration":"PT10H"},"payloads":[{"type":"PRICE","values":[2]}]}]}])";
+    oa3::PriceAt p;
+    size_t count = 0;
+    if (OA3_MAX_EVENTS >= 3) {
+        ASSERT_RESULT(ParseResult::kOk, oa3::parse_events(json, strlen(json), arena, events, 3, &count, &opt));
+        TEST_ASSERT_TRUE(oa3::price_at(events, count, ux("2027-01-01T15:00:00Z"), "PRICE", &p));
+        TEST_ASSERT_EQUAL_DOUBLE(1, p.value->number);
+    }
+    ASSERT_RESULT(ParseResult::kTruncated, oa3::parse_events(json, strlen(json), arena, events, 2, &count, &opt));
+    TEST_ASSERT_EQUAL_size_t(2, count);
+    TEST_ASSERT_EQUAL_STRING("A", events[0].program_id);
+    TEST_ASSERT_EQUAL_STRING("B", events[1].program_id);
+    TEST_ASSERT_TRUE(oa3::price_at(events, count, ux("2027-01-01T15:00:00Z"), "PRICE", &p));
+    TEST_ASSERT_EQUAL_DOUBLE(1, p.value->number);
+}
+
+static void test_window_inverted_is_invalid() {
+    oa3::TimeInterval window = window_of("2027-01-02T00:00:00Z", "PT1H");
+    window.end = window_of("2027-01-01T00:00:00Z", "PT1H").start;
+    const oa3::ParseOptions opt = {nullptr, 0, &window};
+    const char* one = R"({"programID":"p","intervals":[{"id":0,"intervalPeriod":{"start":"2026-12-31T00:00:00Z","duration":"P3D"},"payloads":[{"type":"PRICE","values":[1]}]}]})";
+    ASSERT_RESULT(ParseResult::kInvalidField, event_from(one, &opt));
+    size_t count = 99;
+    ASSERT_RESULT(ParseResult::kInvalidField, oa3::parse_events("[]", 2, arena, events, OA3_MAX_EVENTS, &count, &opt));
+    TEST_ASSERT_EQUAL_size_t(0, count);
+    char wrapped[512];
+    snprintf(wrapped, sizeof(wrapped), R"({"objectType":"EVENT","operation":"POST","object":%s})", one);
+    ASSERT_RESULT(ParseResult::kInvalidField, oa3::parse_notification(wrapped, strlen(wrapped), arena, &notification, &opt));
+
+    window.end = window.start;
+    ASSERT_RESULT(ParseResult::kOk, event_from(one, &opt));
+}
+
+// The arena holds every interval sent, not only the ones a window keeps.
+static size_t windowed_arena_use(int intervals, oa3::JsonArena& fresh) {
+    size_t len = static_cast<size_t>(snprintf(scratch, sizeof(scratch), R"({"programID":"p","intervals":[)"));
+    for (int i = 0; i < intervals; ++i) {
+        oa3::DateTime s{};
+        TEST_ASSERT_TRUE(oa3::from_unix(ux("2026-11-12T08:00:00Z") + 3600 * i, &s));
+        char t[oa3::kDateTimeStringSize];
+        TEST_ASSERT_TRUE(oa3::format_datetime(s, t, sizeof(t)) > 0);
+        len += static_cast<size_t>(snprintf(scratch + len, sizeof(scratch) - len,
+            R"(%s{"id":%d,"intervalPeriod":{"start":"%s","duration":"PT1H"},"payloads":[{"type":"PRICE","values":[0.%06d]}]})",
+            i ? "," : "", i, t, 50000 + i));
+    }
+    snprintf(scratch + len, sizeof(scratch) - len, "]}");
+    TEST_ASSERT_TRUE(len + 3 < sizeof(scratch));
+    const oa3::TimeInterval window = window_of("2026-11-12T08:00:00Z", "PT24H");
+    const oa3::ParseOptions opt = {nullptr, 0, &window};
+    ASSERT_RESULT(ParseResult::kOk, oa3::parse_event(scratch, strlen(scratch), fresh, &event, &opt));
+    TEST_ASSERT_EQUAL_UINT16(24, event.interval_count);
+    return fresh.high_water();
+}
+
+static void test_window_arena_scales_with_intervals_sent() {
+    static oa3::StaticJsonArena<> day_arena;
+    static oa3::StaticJsonArena<> three_day_arena;
+    const size_t day = windowed_arena_use(24, day_arena);
+    const size_t three_days = windowed_arena_use(72, three_day_arena);
+    TEST_ASSERT_TRUE(three_days > 2 * day);
+    char msg[96];
+    snprintf(msg, sizeof(msg), "72-interval event under a 24 h window: arena high water %u of %u bytes",
+             static_cast<unsigned>(three_days), static_cast<unsigned>(three_day_arena.capacity()));
+    TEST_MESSAGE(msg);
+}
+
+// 72 hourly intervals, inherited from the event or sequential, are more than
+// OA3_MAX_INTERVALS; a 24 h window keeps the 24 in it and makes their starts explicit.
+static void test_window_drops_intervals_beyond_capacity() {
+    for (int sequential = 0; sequential < 2; ++sequential) {
+        size_t len = static_cast<size_t>(snprintf(scratch, sizeof(scratch),
+            R"({"programID":"p","intervalPeriod":{"start":"2026-11-01T07:00:00Z","duration":"PT1H"},"intervals":[)"));
+        for (int i = 0; i < 72; ++i) {
+            const char* period = sequential && i > 0 ? R"("intervalPeriod":{"start":"0001-01-01T00:00:00Z"},)" : "";
+            len += static_cast<size_t>(snprintf(scratch + len, sizeof(scratch) - len,
+                R"(%s{"id":%d,%s"payloads":[{"type":"PRICE","values":[%d]}]})", i ? "," : "", i, period, i));
+        }
+        snprintf(scratch + len, sizeof(scratch) - len, "]}");
+        ASSERT_RESULT(ParseResult::kCapacityExceeded, event_from(scratch));
+
+        const oa3::TimeInterval window = window_of("2026-11-02T13:00:00Z", "PT24H");
+        oa3::ParseOptions opt = {nullptr, 0, &window};
+        ASSERT_RESULT(ParseResult::kOk, event_from(scratch, &opt));
+        TEST_ASSERT_EQUAL_UINT16(24, event.interval_count);
+        TEST_ASSERT_EQUAL_UINT16(24, event.value_count);
+        TEST_ASSERT_EQUAL_INT32(30, event.intervals[0].id);
+        TEST_ASSERT_EQUAL_STRING("30", event.values[0].text);
+        TEST_ASSERT_TRUE(event.intervals[0].interval_period.has_start);
+
+        oa3::ResolvedInterval r[OA3_MAX_INTERVALS];
+        TEST_ASSERT_EQUAL_size_t(24, oa3::resolve_intervals(event, r, OA3_MAX_INTERVALS));
+        TEST_ASSERT_EQUAL_INT64(ux("2026-11-02T13:00:00Z"), oa3::to_unix(r[0].period.start));
+        TEST_ASSERT_EQUAL_INT64(ux("2026-11-03T13:00:00Z"), oa3::to_unix(r[23].period.end));
+    }
+}
+
+static void test_window_keeps_looping_and_timeless_events() {
+    const oa3::TimeInterval window = window_of("2027-01-01T00:00:00Z", "PT24H");
+    oa3::ParseOptions opt = {nullptr, 0, &window};
+    const char* json = R"([
+      {"programID":"loop","duration":"P9999Y","intervalPeriod":{"start":"2026-01-01T00:00:00Z","duration":"PT12H"},
+       "intervals":[{"id":0,"payloads":[{"type":"PRICE","values":[1]}]},{"id":1,"payloads":[{"type":"PRICE","values":[2]}]}]},
+      {"programID":"past","intervalPeriod":{"start":"2026-01-01T00:00:00Z","duration":"PT1H"},
+       "intervals":[{"id":0,"payloads":[{"type":"PRICE","values":[3]}]}]},
+      {"programID":"timeless","intervals":[{"id":0,"payloads":[{"type":"PRICE","values":[4]}]}]}])";
+    size_t count = 0;
+    ASSERT_RESULT(ParseResult::kOk, oa3::parse_events(json, strlen(json), arena, events, 2, &count, &opt));
+    TEST_ASSERT_EQUAL_size_t(2, count);
+    TEST_ASSERT_EQUAL_STRING("loop", events[0].program_id);
+    TEST_ASSERT_EQUAL_UINT16(2, events[0].interval_count);
+    TEST_ASSERT_EQUAL_STRING("timeless", events[1].program_id);
+    oa3::PriceAt p;
+    TEST_ASSERT_TRUE(oa3::price_at(events, count, ux("2027-01-01T13:00:00Z"), "PRICE", &p));
+    TEST_ASSERT_EQUAL_DOUBLE(2, p.value->number);
+
+    // A timeless event gives way to one with a period.
+    ASSERT_RESULT(ParseResult::kTruncated, oa3::parse_events(json, strlen(json), arena, events, 1, &count, &opt));
+    TEST_ASSERT_EQUAL_size_t(1, count);
+    TEST_ASSERT_EQUAL_STRING("loop", events[0].program_id);
 }
 
 static void test_price_at_on_parsed_fixture() {
@@ -795,7 +1016,7 @@ static void test_price_at_on_parsed_fixture() {
     TEST_ASSERT_EQUAL_PTR(&events[0], p.event);
     TEST_ASSERT_EQUAL_UINT16(16, p.interval_index);
     TEST_ASSERT_EQUAL_PTR(&events[0].values[16], p.value);
-    TEST_ASSERT_EQUAL_INT64(ux("2026-11-15T01:00:00Z"), p.next_change_unix);
+    TEST_ASSERT_EQUAL_INT64(ux("2026-11-15T01:00:00Z"), oa3::to_unix(p.next_change));
     TEST_ASSERT_TRUE(oa3::price_at(events, count, ux("2026-11-14T23:59:59Z"), "PRICE", &p));
     TEST_ASSERT_EQUAL_UINT16(15, p.interval_index);
 }
@@ -895,6 +1116,13 @@ int main() {
     RUN_TEST(test_marker_bytes_in_strings);
     RUN_TEST(test_blank_datetime_and_duration_absent);
     RUN_TEST(test_event_at_every_limit);
+    RUN_TEST(test_window_keeps_overlapping_events_and_intervals);
+    RUN_TEST(test_window_truncates_to_earliest);
+    RUN_TEST(test_window_eviction_keeps_arrival_order);
+    RUN_TEST(test_window_inverted_is_invalid);
+    RUN_TEST(test_window_arena_scales_with_intervals_sent);
+    RUN_TEST(test_window_drops_intervals_beyond_capacity);
+    RUN_TEST(test_window_keeps_looping_and_timeless_events);
     RUN_TEST(test_price_at_on_parsed_fixture);
     RUN_TEST(test_spring_forward_day_23_intervals);
     RUN_TEST(test_empty_arrays);

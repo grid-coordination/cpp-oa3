@@ -5,6 +5,7 @@
 
 #include <oa3/model/entities.h>
 #include <oa3/model/time.h>
+#include <oa3/model/time_interval.h>
 
 namespace oa3 {
 
@@ -21,20 +22,23 @@ struct ResolvedInterval {
     DateTime start;
     Duration duration;
     Duration randomize_start;
-    bool has_period;  // has_start and has_duration
-    int64_t start_unix;
-    int64_t end_unix;  // to_unix(add(start, duration))
+    bool has_period;  // has_start and a non-negative duration
+    TimeInterval period;
 };
 
 // Yields the event's intervals in order, resolved, without storage for all of them.
 class IntervalResolver {
 public:
     explicit IntervalResolver(const Event& event);
+    // Without an Event: pass each interval's period, in order, to resolve().
+    explicit IntervalResolver(const IntervalPeriod* event_period);
     bool next(ResolvedInterval* out);
+    void resolve(const IntervalPeriod* interval_period, int32_t id, ResolvedInterval* out);
     void reset();
 
 private:
     const Event* _event;
+    const IntervalPeriod* _event_period;
     uint16_t _next;
     bool _has_accumulated;
     Duration _accumulated;
@@ -45,6 +49,31 @@ private:
 
 // Returns the number written: the event's interval count, at most capacity.
 size_t resolve_intervals(const Event& event, ResolvedInterval* out, size_t capacity);
+
+// Where an event lies in time. It loops (User_Guide 7.3 "event.duration") when it has a
+// non-negative duration and every interval has a finite period: the intervals repeat every
+// hull length from the hull's start until the first interval's start plus the duration.
+struct EventExtent {
+    bool has_period;  // some interval has a period
+    bool looping;
+    TimeInterval hull;  // of the intervals with a period
+    TimeInterval span;  // looping: [hull.start, first start + duration); else the hull
+};
+
+class ExtentBuilder {
+public:
+    ExtentBuilder();
+    void add(const ResolvedInterval& r);
+    EventExtent finish(bool has_duration, const Duration& duration) const;
+
+private:
+    bool _any;
+    bool _all_periods;
+    DateTime _first_start;
+    TimeInterval _hull;
+};
+
+EventExtent event_extent(const Event& event);
 
 // PRICE, EXPORT_PRICE and GHG: one value per sub-interval when a payload packs several
 // (User_Guide.md:674-677, 730).
@@ -58,16 +87,15 @@ struct PriceAt {
     const Value* value;
     uint16_t value_count;  // values the active span covers: 1, or the payload's count for a
                            // type that is not unitary
-    int64_t start_unix;    // the active span
-    int64_t end_unix;
+    TimeInterval span;     // the active span
     bool has_next_change;
-    int64_t next_change_unix;  // the first span boundary after now, active or not
+    DateTime next_change;  // the first span boundary after now, active or not
 };
 
 // The value of payload_type in force at now across events. Returns out->active.
-bool price_at(const Event* events, size_t event_count, int64_t now_unix,
-              const char* payload_type, PriceAt* out);
 bool price_at(const Event* events, size_t event_count, const DateTime& now,
+              const char* payload_type, PriceAt* out);
+bool price_at(const Event* events, size_t event_count, int64_t now_unix,
               const char* payload_type, PriceAt* out);
 
 }  // namespace oa3

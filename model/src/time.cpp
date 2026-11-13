@@ -177,6 +177,17 @@ unsigned days_in_month(int64_t year, unsigned month) {
     return kDays[month - 1];
 }
 
+namespace {
+
+// The instants whose UTC year fits int16_t.
+bool in_range(int64_t seconds) {
+    static const int64_t kMin = days_from_civil(INT16_MIN, 1, 1) * kSecondsPerDay;
+    static const int64_t kMax = days_from_civil(static_cast<int64_t>(INT16_MAX) + 1, 1, 1) * kSecondsPerDay - 1;
+    return seconds >= kMin && seconds <= kMax;
+}
+
+}  // namespace
+
 bool parse_datetime(const char* s, size_t len, DateTime* out) {
     if (s == nullptr || out == nullptr) {
         return false;
@@ -190,7 +201,6 @@ bool parse_datetime(const char* s, size_t len, DateTime* out) {
         --end;
     }
 
-    DateTime dt{};
     unsigned year = 0;
     unsigned month = 0;
     unsigned day = 0;
@@ -202,10 +212,8 @@ bool parse_datetime(const char* s, size_t len, DateTime* out) {
     if (month < 1 || month > 12 || day < 1 || day > days_in_month(year, month)) {
         return false;
     }
-    dt.year = static_cast<int16_t>(year);
-    dt.month = static_cast<uint8_t>(month);
-    dt.day = static_cast<uint8_t>(day);
-    dt.zone = ZoneForm::kNone;
+    DateTime dt{};
+    dt.seconds = days_from_civil(year, month, day) * kSecondsPerDay;
 
     if (pos == end) {
         *out = dt;
@@ -227,9 +235,7 @@ bool parse_datetime(const char* s, size_t len, DateTime* out) {
     if (hour > 23 || minute > 59 || second > 59) {
         return false;
     }
-    dt.hour = static_cast<uint8_t>(hour);
-    dt.minute = static_cast<uint8_t>(minute);
-    dt.second = static_cast<uint8_t>(second);
+    dt.seconds += hour * 3600 + minute * 60 + second;
 
     if (pos < end && s[pos] == '.') {
         ++pos;
@@ -240,9 +246,7 @@ bool parse_datetime(const char* s, size_t len, DateTime* out) {
 
     if (pos < end) {
         const char z = s[pos++];
-        if (z == 'Z' || z == 'z') {
-            dt.zone = ZoneForm::kUtcZ;
-        } else if (z == '+' || z == '-') {
+        if (z == '+' || z == '-') {
             unsigned oh = 0;
             unsigned om = 0;
             if (!read_fixed(s, end, &pos, 2, &oh) || pos >= end || s[pos++] != ':' ||
@@ -252,10 +256,9 @@ bool parse_datetime(const char* s, size_t len, DateTime* out) {
             if (oh > 23 || om > 59) {
                 return false;
             }
-            const int total = static_cast<int>(oh * 60 + om);
-            dt.offset_minutes = static_cast<int16_t>(z == '-' ? -total : total);
-            dt.zone = ZoneForm::kOffset;
-        } else {
+            const int64_t offset = static_cast<int64_t>(oh * 3600 + om * 60);
+            dt.seconds -= z == '-' ? -offset : offset;
+        } else if (z != 'Z' && z != 'z') {
             return false;
         }
     }
@@ -273,89 +276,75 @@ bool parse_datetime(const char* s, DateTime* out) {
     return parse_datetime(s, strlen(s), out);
 }
 
-size_t format_datetime(const DateTime& dt, char* buf, size_t size) {
-    Writer w(buf, size);
-    if (dt.year < 0 || dt.year > 9999) {
-        return w.fail();
-    }
-    w.put_padded(static_cast<uint64_t>(dt.year), 4);
-    w.put('-');
-    w.put_padded(dt.month, 2);
-    w.put('-');
-    w.put_padded(dt.day, 2);
-    w.put('T');
-    w.put_padded(dt.hour, 2);
-    w.put(':');
-    w.put_padded(dt.minute, 2);
-    w.put(':');
-    w.put_padded(dt.second, 2);
-    const unsigned digits = dt.frac_digits > 0 ? dt.frac_digits : fewest_frac_digits(dt.nanos);
-    if (digits > 0) {
-        w.put_fraction(dt.nanos, digits);
-    }
-    if (dt.zone == ZoneForm::kOffset) {
-        int off = dt.offset_minutes;
-        w.put(off < 0 ? '-' : '+');
-        if (off < 0) {
-            off = -off;
-        }
-        w.put_padded(static_cast<uint64_t>(off / 60), 2);
-        w.put(':');
-        w.put_padded(static_cast<uint64_t>(off % 60), 2);
-    } else {
-        w.put('Z');
-    }
-    return w.finish();
-}
-
-int64_t to_unix(const DateTime& dt) {
-    return days_from_civil(dt.year, dt.month, dt.day) * kSecondsPerDay + dt.hour * 3600 + dt.minute * 60 +
-           dt.second - static_cast<int64_t>(dt.offset_minutes) * 60;
-}
-
-bool from_unix(int64_t unix_seconds, uint32_t nanos, int16_t offset_minutes, DateTime* out) {
-    // Far outside int16 years (about 1.03e12 s), and keeps the additions below from overflowing.
-    constexpr int64_t kLimit = 1000000000000000LL;
-    if (unix_seconds > kLimit || unix_seconds < -kLimit) {
-        return false;
-    }
-    unix_seconds += static_cast<int64_t>(nanos / kNanosPerSecond);
-    nanos = static_cast<uint32_t>(nanos % kNanosPerSecond);
-    const int64_t local = unix_seconds + static_cast<int64_t>(offset_minutes) * 60;
-    const int64_t days = floor_div(local, kSecondsPerDay);
-    const int64_t secs = floor_mod(local, kSecondsPerDay);
+CivilTime to_civil(const DateTime& dt) {
+    const int64_t days = floor_div(dt.seconds, kSecondsPerDay);
+    const int64_t secs = floor_mod(dt.seconds, kSecondsPerDay);
     int64_t year = 0;
     unsigned month = 0;
     unsigned day = 0;
     civil_from_days(days, &year, &month, &day);
-    if (year < INT16_MIN || year > INT16_MAX) {
+    CivilTime c{};
+    c.year = static_cast<int32_t>(year);
+    c.month = static_cast<uint8_t>(month);
+    c.day = static_cast<uint8_t>(day);
+    c.hour = static_cast<uint8_t>(secs / 3600);
+    c.minute = static_cast<uint8_t>((secs / 60) % 60);
+    c.second = static_cast<uint8_t>(secs % 60);
+    return c;
+}
+
+size_t format_datetime(const DateTime& dt, char* buf, size_t size) {
+    Writer w(buf, size);
+    if (!in_range(dt.seconds)) {
+        return w.fail();
+    }
+    const CivilTime c = to_civil(dt);
+    if (c.year < 0 || c.year > 9999) {
+        return w.fail();
+    }
+    w.put_padded(static_cast<uint64_t>(c.year), 4);
+    w.put('-');
+    w.put_padded(c.month, 2);
+    w.put('-');
+    w.put_padded(c.day, 2);
+    w.put('T');
+    w.put_padded(c.hour, 2);
+    w.put(':');
+    w.put_padded(c.minute, 2);
+    w.put(':');
+    w.put_padded(c.second, 2);
+    const unsigned digits = dt.frac_digits > 0 ? dt.frac_digits : fewest_frac_digits(dt.nanos);
+    if (digits > 0) {
+        w.put_fraction(dt.nanos, digits);
+    }
+    w.put('Z');
+    return w.finish();
+}
+
+bool from_unix(int64_t unix_seconds, uint32_t nanos, DateTime* out) {
+    if (out == nullptr || !in_range(unix_seconds)) {
         return false;
     }
-
+    unix_seconds += static_cast<int64_t>(nanos / kNanosPerSecond);
+    nanos = static_cast<uint32_t>(nanos % kNanosPerSecond);
+    if (!in_range(unix_seconds)) {
+        return false;
+    }
     DateTime dt{};
-    dt.year = static_cast<int16_t>(year);
-    dt.month = static_cast<uint8_t>(month);
-    dt.day = static_cast<uint8_t>(day);
-    dt.hour = static_cast<uint8_t>(secs / 3600);
-    dt.minute = static_cast<uint8_t>((secs / 60) % 60);
-    dt.second = static_cast<uint8_t>(secs % 60);
+    dt.seconds = unix_seconds;
     dt.nanos = nanos;
     dt.frac_digits = fewest_frac_digits(nanos);
-    dt.offset_minutes = offset_minutes;
-    dt.zone = offset_minutes == 0 ? ZoneForm::kUtcZ : ZoneForm::kOffset;
     *out = dt;
     return true;
 }
 
 bool from_unix(int64_t unix_seconds, DateTime* out) {
-    return from_unix(unix_seconds, 0, 0, out);
+    return from_unix(unix_seconds, 0, out);
 }
 
 int compare(const DateTime& a, const DateTime& b) {
-    const int64_t ua = to_unix(a);
-    const int64_t ub = to_unix(b);
-    if (ua != ub) {
-        return ua < ub ? -1 : 1;
+    if (a.seconds != b.seconds) {
+        return a.seconds < b.seconds ? -1 : 1;
     }
     if (a.nanos != b.nanos) {
         return a.nanos < b.nanos ? -1 : 1;
@@ -589,48 +578,37 @@ bool duration_sum(const Duration& a, const Duration& b, Duration* out) {
 }
 
 bool add(const DateTime& dt, const Duration& d, DateTime* out) {
-    if (out == nullptr) {
+    if (out == nullptr || !in_range(dt.seconds)) {
         return false;
     }
-    const int64_t month_index = static_cast<int64_t>(dt.year) * 12 + (static_cast<int64_t>(dt.month) - 1) +
+    const CivilTime c = to_civil(dt);
+    const int64_t month_index = static_cast<int64_t>(c.year) * 12 + (static_cast<int64_t>(c.month) - 1) +
                                 static_cast<int64_t>(d.years) * 12 + d.months;
     const int64_t year = floor_div(month_index, 12);
     const unsigned month = static_cast<unsigned>(floor_mod(month_index, 12) + 1);
-    unsigned day = dt.day;
+    unsigned day = c.day;
     const unsigned dim = days_in_month(year, month);
     if (day > dim) {
         day = dim;
     }
+    if (year < INT16_MIN || year > INT16_MAX) {
+        return false;
+    }
 
-    int64_t days = days_from_civil(year, month, day) + static_cast<int64_t>(d.weeks) * 7 + d.days;
-
+    const int64_t days = days_from_civil(year, month, day) + static_cast<int64_t>(d.weeks) * 7 + d.days;
     int64_t nanos = static_cast<int64_t>(dt.nanos) + d.nanos;
-    int64_t secs = static_cast<int64_t>(dt.hour) * 3600 + dt.minute * 60 + dt.second +
-                   static_cast<int64_t>(d.hours) * 3600 + static_cast<int64_t>(d.minutes) * 60 + d.seconds;
-    secs += floor_div(nanos, kNanosPerSecond);
+    const int64_t secs = days * kSecondsPerDay + floor_mod(dt.seconds, kSecondsPerDay) +
+                         static_cast<int64_t>(d.hours) * 3600 + static_cast<int64_t>(d.minutes) * 60 + d.seconds +
+                         floor_div(nanos, kNanosPerSecond);
     nanos = floor_mod(nanos, kNanosPerSecond);
-    days += floor_div(secs, kSecondsPerDay);
-    secs = floor_mod(secs, kSecondsPerDay);
-
-    int64_t y = 0;
-    unsigned m = 0;
-    unsigned dd = 0;
-    civil_from_days(days, &y, &m, &dd);
-    if (y < INT16_MIN || y > INT16_MAX) {
+    if (!in_range(secs)) {
         return false;
     }
 
     DateTime r{};
-    r.year = static_cast<int16_t>(y);
-    r.month = static_cast<uint8_t>(m);
-    r.day = static_cast<uint8_t>(dd);
-    r.hour = static_cast<uint8_t>(secs / 3600);
-    r.minute = static_cast<uint8_t>((secs / 60) % 60);
-    r.second = static_cast<uint8_t>(secs % 60);
+    r.seconds = secs;
     r.nanos = static_cast<uint32_t>(nanos);
     r.frac_digits = dt.frac_digits > d.frac_digits ? dt.frac_digits : d.frac_digits;
-    r.offset_minutes = dt.offset_minutes;
-    r.zone = dt.zone;
     *out = r;
     return true;
 }

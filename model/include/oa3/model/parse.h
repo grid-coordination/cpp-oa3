@@ -6,6 +6,7 @@
 #include <oa3/model/byte_reader.h>
 #include <oa3/model/entities.h>
 #include <oa3/model/json_arena.h>
+#include <oa3/model/time_interval.h>
 
 namespace oa3 {
 
@@ -15,6 +16,8 @@ enum class ParseResult : uint8_t {
     kTooLarge,          // the arena ran out, or nesting too deep
     kCapacityExceeded,  // more items, or a longer string, than a fixed struct holds
     kInvalidField,      // a required field is missing, or a field has the wrong type or format
+    kTruncated,         // parse_events with a window: more events overlap it than fit; the ones
+                        // reaching into it earliest are kept, complete and usable
 };
 
 const char* to_string(ParseResult r);
@@ -24,6 +27,12 @@ struct ParseOptions {
     // every type.
     const char* const* payload_types;
     size_t payload_type_count;
+    // Keeps only what overlaps this window, e.g. [now, now + 24 h). parse_events skips an event
+    // outside it without using a slot; every event parse drops the intervals outside it, unless
+    // the event has a duration (it may loop), and writes the resolved period into each interval
+    // kept after a dropped one. An event with no resolvable interval period is kept. nullptr
+    // keeps everything; an end before the start is kInvalidField.
+    const TimeInterval* window;
 };
 
 // Each function fills *out from scratch. Keys are read in camelCase or in VTN-RI snake_case
@@ -46,7 +55,8 @@ ParseResult parse_event(const char* json, size_t len, JsonArena& arena, Event* o
 ParseResult parse_event(ByteReader& in, JsonArena& arena, Event* out,
                         const ParseOptions* options = nullptr);
 
-// An /events response, as parse_programs.
+// An /events response, as parse_programs. With options->window, kTruncated instead of
+// kCapacityExceeded; kept events stay in arrival order.
 ParseResult parse_events(const char* json, size_t len, JsonArena& arena, Event* out,
                          size_t capacity, size_t* count, const ParseOptions* options = nullptr);
 ParseResult parse_events(ByteReader& in, JsonArena& arena, Event* out, size_t capacity,

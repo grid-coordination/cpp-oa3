@@ -5,43 +5,42 @@
 
 namespace oa3 {
 
-enum class ZoneForm : uint8_t {
-    kUtcZ,    // "Z"
-    kOffset,  // "+hh:mm" or "-hh:mm", "+00:00" included
-    kNone,    // no zone on the wire (VTN-RI "YYYY-MM-DD HH:MM:SS", or a date alone): UTC
+// An instant in UTC. Offsets on the wire are applied at parse time and not kept; local time
+// is the port's concern. Proleptic Gregorian, years -32768..32767.
+struct DateTime {
+    int64_t seconds;      // since 1970-01-01T00:00:00Z
+    uint32_t nanos;       // 0..999999999
+    uint8_t frac_digits;  // digits of fraction on the wire, 0..9, kept for formatting
 };
 
-// A wall-clock time and the UTC offset it was written with. Proleptic Gregorian.
-struct DateTime {
-    int16_t year;  // 0..9999 from the wire; arithmetic may go beyond
+// "YYYY-MM-DDTHH:MM:SS.fffffffffZ" and the NUL.
+constexpr size_t kDateTimeStringSize = 31;
+
+// RFC 3339 with "Z" or a "+hh:mm"/"-hh:mm" offset, converted to UTC. A string without a zone
+// (VTN-RI "YYYY-MM-DD HH:MM:SS", or a date alone) is read as UTC.
+bool parse_datetime(const char* s, size_t len, DateTime* out);
+bool parse_datetime(const char* s, DateTime* out);
+
+// Writes the NUL-terminated UTC form with "Z" and returns its length, or 0 if it does not fit
+// or the year is outside 0..9999.
+size_t format_datetime(const DateTime& dt, char* buf, size_t size);
+
+inline int64_t to_unix(const DateTime& dt) { return dt.seconds; }
+
+// frac_digits is the fewest digits that represent nanos. False outside the year range.
+bool from_unix(int64_t unix_seconds, uint32_t nanos, DateTime* out);
+bool from_unix(int64_t unix_seconds, DateTime* out);
+
+struct CivilTime {
+    int32_t year;
     uint8_t month;
     uint8_t day;
     uint8_t hour;
     uint8_t minute;
     uint8_t second;
-    uint8_t frac_digits;  // digits of fraction on the wire, 0..9
-    uint32_t nanos;
-    int16_t offset_minutes;
-    ZoneForm zone;
 };
 
-// "YYYY-MM-DDTHH:MM:SS.fffffffff+hh:mm" and the NUL.
-constexpr size_t kDateTimeStringSize = 36;
-
-bool parse_datetime(const char* s, size_t len, DateTime* out);
-bool parse_datetime(const char* s, DateTime* out);
-
-// Writes the NUL-terminated form and returns its length, or 0 if it does not fit or the
-// year is outside 0..9999. kNone is written as "Z".
-size_t format_datetime(const DateTime& dt, char* buf, size_t size);
-
-// Seconds since 1970-01-01T00:00:00Z; the fraction is dropped.
-int64_t to_unix(const DateTime& dt);
-
-// zone is kUtcZ when offset_minutes is 0, else kOffset. frac_digits is the fewest digits
-// that represent nanos. False if the year leaves int16 range.
-bool from_unix(int64_t unix_seconds, uint32_t nanos, int16_t offset_minutes, DateTime* out);
-bool from_unix(int64_t unix_seconds, DateTime* out);
+CivilTime to_civil(const DateTime& dt);
 
 // Orders by instant, fraction included; <0, 0, >0.
 int compare(const DateTime& a, const DateTime& b);
@@ -83,10 +82,10 @@ bool is_indefinite(const Duration& d);
 // Field by field, without normalizing. False on int32 overflow.
 bool duration_sum(const Duration& a, const Duration& b, Duration* out);
 
-// Calendar-aware add on dt's own wall clock and offset, as pendulum DateTime.add():
-// years and months first, clamping the day to the target month's length (Jan 31 + P1M is
-// Feb 29 or 28), then weeks and days, then hours, minutes, seconds and fraction as
-// elapsed time. Keeps dt's offset and zone form. False if the year leaves int16 range.
+// Calendar-aware add on the UTC date, as pendulum DateTime.add() in UTC: years and months
+// first, clamping the day to the target month's length (Jan 31 + P1M is Feb 29 or 28), then
+// weeks and days, then hours, minutes, seconds and fraction as elapsed time. False if the
+// year leaves the DateTime range.
 bool add(const DateTime& dt, const Duration& d, DateTime* out);
 
 }  // namespace oa3
