@@ -1,6 +1,6 @@
 # Builds the library without PlatformIO, for a host check, embedded Linux or another RTOS.
 # Usage from a parent project: add_subdirectory(path/to/cpp-oa3) and link oa3, the umbrella,
-# or one component target (oa3_model).
+# or one component target (oa3_model, oa3_client).
 cmake_minimum_required(VERSION 3.18)
 project(oa3 VERSION 0.0.0 LANGUAGES CXX)
 
@@ -23,12 +23,14 @@ if(NOT TARGET ArduinoJson)
 endif()
 
 add_subdirectory(model)
+add_subdirectory(client)
 
 add_library(oa3 INTERFACE)
-target_link_libraries(oa3 INTERFACE oa3_model)
+target_link_libraries(oa3 INTERFACE oa3_model oa3_client)
 
 if(_oa3_top_level AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(oa3_model PRIVATE -Wall -Wextra)
+    target_compile_options(oa3_client PRIVATE -Wall -Wextra)
 endif()
 
 # Compiles every public header in a translation unit of its own, so a header that needs
@@ -51,6 +53,7 @@ if(OA3_CHECK_HEADERS)
         endif()
     endfunction()
     oa3_header_check(oa3_model ${CMAKE_CURRENT_SOURCE_DIR}/model/include)
+    oa3_header_check(oa3_client ${CMAKE_CURRENT_SOURCE_DIR}/client/include)
 endif()
 
 # The Unity suites in test/, one CTest test each. Off when the library is a subproject.

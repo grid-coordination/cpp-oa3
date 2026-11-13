@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fails if model/ uses heap allocation, STL containers or strings, lambdas, or a platform
+# Fails if model/ or client/ uses heap allocation, STL containers or strings, lambdas, or a platform
 # header (CONTRIBUTING.md). Line comments are stripped first; the model has no block comments.
 set -eu
 
@@ -14,7 +14,7 @@ banned="$banned"'|\[[^]]*\][[:space:]]*\([^)]*\)[[:space:]]*(mutable[[:space:]]*
 banned="$banned"'|/\*'
 
 rc=0
-for f in $(find "$root/model/include" "$root/model/src" -type f \( -name '*.h' -o -name '*.cpp' \) | sort); do
+for f in $(find "$root/model/include" "$root/model/src" "$root/client/include" "$root/client/src" -type f \( -name '*.h' -o -name '*.cpp' \) | sort); do
     hits=$(sed 's://.*$::' "$f" | grep -nE "$banned" || true)
     if [ -n "$hits" ]; then
         printf '%s\n' "$hits" | sed "s|^|${f#"$root"/}:|"

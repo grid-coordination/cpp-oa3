@@ -1,0 +1,5 @@
+file(GLOB _oa3_client_sources CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+add_library(oa3_client STATIC ${_oa3_client_sources})
+target_include_directories(oa3_client PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(oa3_client PUBLIC cxx_std_17)
+target_link_libraries(oa3_client PUBLIC oa3_model)

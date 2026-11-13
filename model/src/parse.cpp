@@ -1081,8 +1081,70 @@ ParseResult place_event(JsonVariantConst v, EventSlots* slots, const ParseOption
     return ParseResult::kOk;
 }
 
+bool has_event_filter(const ParseOptions* opt) {
+    return opt != nullptr && (opt->program_id != nullptr || opt->ven_targets != nullptr);
+}
+
+// The ParseOptions program and target checks, on the JSON so that a rejected event costs no
+// slot. A targets member of the wrong type passes, for copy_event to report.
+bool event_wanted(JsonVariantConst v, const ParseOptions* opt) {
+    if (!has_event_filter(opt) || !v.is<JsonObjectConst>()) {
+        return true;
+    }
+    JsonObjectConst o = v.as<JsonObjectConst>();
+    if (opt->program_id != nullptr) {
+        JsonVariantConst p = get(o, "programID", "program_id");
+        if (p.is<const char*>()) {
+            const char* id = p.as<const char*>();
+            if (id[0] != '\0' && strcmp(id, opt->program_id) != 0) {
+                return false;
+            }
+        }
+    }
+    if (opt->ven_targets == nullptr) {
+        return true;
+    }
+    JsonVariantConst t = o["targets"];
+    if (!t.is<JsonArrayConst>() || t.as<JsonArrayConst>().size() == 0) {
+        return true;
+    }
+    for (JsonVariantConst x : t.as<JsonArrayConst>()) {
+        if (!x.is<const char*>()) {
+            continue;
+        }
+        for (size_t j = 0; j < opt->ven_target_count; ++j) {
+            if (opt->ven_targets[j] != nullptr && strcmp(x.as<const char*>(), opt->ven_targets[j]) == 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// find_program: the name sought and where a match goes.
+struct ProgramMatch {
+    const char* name;
+    Program* out;
+    bool* found;
+};
+
+ParseResult match_program(JsonVariantConst v, ProgramMatch* match, const ParseOptions* opt) {
+    if (*match->found || !v.is<JsonObjectConst>()) {
+        return ParseResult::kOk;
+    }
+    JsonVariantConst name = get(v.as<JsonObjectConst>(), "programName", "program_name");
+    if (!name.is<const char*>() || strcmp(name.as<const char*>(), match->name) != 0) {
+        return ParseResult::kOk;
+    }
+    memset(match->out, 0, sizeof(*match->out));
+    OA3_TRY(copy_program(v, match->out, opt, nullptr));
+    *match->found = true;
+    return ParseResult::kOk;
+}
+
 ParseResult parse_one(LiteralReader& reader, JsonArena& arena, Kind kind, void* out,
-                      const ParseOptions* opt, EventSlots* slots = nullptr) {
+                      const ParseOptions* opt, EventSlots* slots = nullptr,
+                      ProgramMatch* match = nullptr, bool* skipped = nullptr) {
     if (window_inverted(opt)) {
         return ParseResult::kInvalidField;
     }
@@ -1100,8 +1162,18 @@ ParseResult parse_one(LiteralReader& reader, JsonArena& arena, Kind kind, void* 
     if (r != ParseResult::kOk) {
         return r;
     }
+    if (skipped != nullptr && !event_wanted(doc.as<JsonVariantConst>(), opt)) {
+        *skipped = true;
+        return ParseResult::kOk;
+    }
     if (slots != nullptr) {
         return place_event(doc.as<JsonVariantConst>(), slots, opt);
+    }
+    if (out == nullptr && match == nullptr) {
+        return ParseResult::kCapacityExceeded;
+    }
+    if (match != nullptr) {
+        return match_program(doc.as<JsonVariantConst>(), match, opt);
     }
     switch (kind) {
         case Kind::kProgram:
@@ -1127,12 +1199,19 @@ int next_non_space(LiteralReader& reader) {
 }
 
 ParseResult parse_array(ByteReader& in, JsonArena& arena, Kind kind, void* out, size_t stride,
-                        size_t capacity, size_t* count, const ParseOptions* opt) {
-    *count = 0;
+                        size_t capacity, size_t* count, const ParseOptions* opt,
+                        size_t* scanned = nullptr, bool append = false) {
+    if (!append) {
+        *count = 0;
+    }
+    if (scanned != nullptr) {
+        *scanned = 0;
+    }
     if (window_inverted(opt)) {
         return ParseResult::kInvalidField;
     }
     const bool windowed = kind == Kind::kEvent && window_of(opt) != nullptr;
+    const bool filtered = kind == Kind::kEvent && has_event_filter(opt);
     EventSlots slots{static_cast<Event*>(out), capacity, count, false};
     LiteralReader reader(in);
     int c = next_non_space(reader);
@@ -1152,25 +1231,72 @@ ParseResult parse_array(ByteReader& in, JsonArena& arena, Kind kind, void* out, 
         }
         reader.unread(c);
         ParseResult r;
+        bool skipped = false;
+        bool* skip = filtered ? &skipped : nullptr;
         if (windowed) {
-            r = parse_one(reader, arena, kind, nullptr, opt, &slots);
-        } else {
-            if (*count >= capacity) {
+            r = parse_one(reader, arena, kind, nullptr, opt, &slots, nullptr, skip);
+        } else if (*count >= capacity) {
+            if (!filtered) {
                 return ParseResult::kCapacityExceeded;
             }
+            r = parse_one(reader, arena, kind, nullptr, opt, nullptr, nullptr, skip);
+        } else {
             void* item = static_cast<unsigned char*>(out) + *count * stride;
             memset(item, 0, stride);
-            r = parse_one(reader, arena, kind, item, opt);
-            if (r == ParseResult::kOk) {
+            r = parse_one(reader, arena, kind, item, opt, nullptr, nullptr, skip);
+            if (r == ParseResult::kOk && !skipped) {
                 ++*count;
             }
         }
         if (r != ParseResult::kOk) {
             return r;
         }
+        if (scanned != nullptr) {
+            ++*scanned;
+        }
         c = next_non_space(reader);
         if (c == ']') {
             return slots.truncated ? ParseResult::kTruncated : ParseResult::kOk;
+        }
+        if (c != ',') {
+            return ParseResult::kJsonError;
+        }
+        c = next_non_space(reader);
+    }
+}
+
+bool starts_json_value(int c) {
+    return c == '{' || c == '"' || c == '-' || (c >= '0' && c <= '9') || c == 't' || c == 'f' ||
+           c == 'n';
+}
+
+ParseResult scan_programs(ByteReader& in, JsonArena& arena, ProgramMatch* match, size_t* scanned,
+                          const ParseOptions* opt) {
+    if (window_inverted(opt)) {
+        return ParseResult::kInvalidField;
+    }
+    LiteralReader reader(in);
+    int c = next_non_space(reader);
+    if (c != '[') {
+        return starts_json_value(c) ? ParseResult::kInvalidField : ParseResult::kJsonError;
+    }
+    c = next_non_space(reader);
+    if (c == ']') {
+        return ParseResult::kOk;
+    }
+    for (;;) {
+        if (c < 0) {
+            return ParseResult::kJsonError;
+        }
+        if (c != '{') {
+            return ParseResult::kInvalidField;
+        }
+        reader.unread(c);
+        OA3_TRY(parse_one(reader, arena, Kind::kProgram, nullptr, opt, nullptr, match));
+        ++*scanned;
+        c = next_non_space(reader);
+        if (c == ']') {
+            return ParseResult::kOk;
         }
         if (c != ',') {
             return ParseResult::kJsonError;
@@ -1205,6 +1331,23 @@ ParseResult parse_programs(const char* json, size_t len, JsonArena& arena, Progr
     return parse_programs(in, arena, out, capacity, count, options);
 }
 
+ParseResult find_program(ByteReader& in, JsonArena& arena, const char* name, Program* out,
+                         bool* found, size_t* scanned, const ParseOptions* options) {
+    *found = false;
+    *scanned = 0;
+    if (name == nullptr) {
+        return ParseResult::kInvalidField;
+    }
+    ProgramMatch match{name, out, found};
+    return scan_programs(in, arena, &match, scanned, options);
+}
+
+ParseResult find_program(const char* json, size_t len, JsonArena& arena, const char* name,
+                         Program* out, bool* found, size_t* scanned, const ParseOptions* options) {
+    BufferReader in(json, len);
+    return find_program(in, arena, name, out, found, scanned, options);
+}
+
 ParseResult parse_event(ByteReader& in, JsonArena& arena, Event* out,
                         const ParseOptions* options) {
     memset(out, 0, sizeof(*out));
@@ -1227,6 +1370,19 @@ ParseResult parse_events(const char* json, size_t len, JsonArena& arena, Event* 
                          size_t capacity, size_t* count, const ParseOptions* options) {
     BufferReader in(json, len);
     return parse_events(in, arena, out, capacity, count, options);
+}
+
+ParseResult append_events(ByteReader& in, JsonArena& arena, Event* out, size_t capacity,
+                          size_t* count, size_t* scanned, const ParseOptions* options) {
+    return parse_array(in, arena, Kind::kEvent, out, sizeof(Event), capacity, count, options,
+                       scanned, true);
+}
+
+ParseResult append_events(const char* json, size_t len, JsonArena& arena, Event* out,
+                          size_t capacity, size_t* count, size_t* scanned,
+                          const ParseOptions* options) {
+    BufferReader in(json, len);
+    return append_events(in, arena, out, capacity, count, scanned, options);
 }
 
 ParseResult parse_notification(ByteReader& in, JsonArena& arena, Notification* out,

@@ -16,3 +16,15 @@ All notable changes to `cpp-oa3` are recorded here. Format follows [Keep a Chang
   - Interval resolution with `intervalPeriod` inheritance, the `0001-01-01` sequential start, and event-level `randomizeStart`; resolved intervals expose a `TimeInterval`. `event_extent()` gives an event's hull and, with a `duration`, its looping span.
   - `price_at()`: the value in force at an instant across events, with priority, multi-value sub-intervals, event `duration` looping, and the next change time.
   - Target matching helpers.
+  - `find_program()`: scans a `/programs` page for one `programName` without storing the others, and reports how many elements it read.
+  - `ParseOptions::program_id` and `ven_targets`: `parse_events()` skips an event of another program, or one whose targets do not match the VEN, before it takes a slot.
+  - `append_events()`: reads further `/events` pages into the same array, keeping the window's earliest events across pages.
+- `oa3_client` component (milestone M3): `VenClient`, a polling VEN for one program with no threads and no heap.
+  - Resolves the program by id (`GET /programs/<id>`) or by name, through the price server's `programName` query or, when a VTN refuses it with a 4xx, by paging `/programs`.
+  - Polls `/events?programID=<id>` with `targets`, `skip` and `limit`, one request per `loop()`, reading further pages on the following calls. Only the configured payload type and the events in `[now, now + horizon)` are kept; a failed fetch keeps the last good events.
+  - `on_price_change` fires when the value in force changes, including at interval boundaries without a request; `on_status` reports `VenStatus` changes, with the HTTP and parse results and the retry delay.
+  - Exponential backoff on failure, `STALE` after `stale_after_polls` poll periods without a successful fetch, `WAITING_FOR_CLOCK` until the port's wall clock is valid, and a fresh fetch when the wall clock steps by more than 5 s.
+  - Port interfaces `HttpTransport` (one request at a time; no connection outlives a call), `Clock` and `LogSink`. `HttpTransport::post()` has a default that returns `kUnsupported`, for the VTN authentication of a later release.
+  - Caller-owned `VenStorage` (event arrays and JSON arena), so a port can place it in PSRAM; `StaticVenStorage<>` for static storage.
+- POSIX port (`ports/posix`): `CurlHttpTransport` over libcurl, `PosixClock`, `stderr_log`, and the `oa3-ven-demo` program, with CI jobs for GCC and Clang.
+- `doc/porting.md`: the contract a port implements, with guidance for arduino-esp32 3.x.

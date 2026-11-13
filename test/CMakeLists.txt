@@ -1,5 +1,6 @@
 # The Unity suites, built and run without PlatformIO. Each test_<name>/ directory is one
-# executable and one CTest test. A test_model_<name>/ suite links oa3_model alone.
+# executable and one CTest test. A test_client_<name>/ suite links oa3_client; any other
+# links oa3_model alone.
 
 # Unity 2.6.1, the release PlatformIO's `test_framework = unity` resolves to, so a suite
 # behaves the same under `pio test` and under CTest. To build offline, pass
@@ -23,7 +24,11 @@ foreach(_suite IN LISTS _oa3_suites)
     endif()
     file(GLOB _sources CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${_suite}/*.cpp)
     add_executable(${_suite} ${_sources})
-    target_link_libraries(${_suite} PRIVATE oa3_model unity)
+    if(_suite MATCHES "^test_client_")
+        target_link_libraries(${_suite} PRIVATE oa3_client unity)
+    else()
+        target_link_libraries(${_suite} PRIVATE oa3_model unity)
+    endif()
     target_compile_definitions(${_suite} PRIVATE OA3_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(${_suite} PRIVATE -Wall -Wextra)

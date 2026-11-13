@@ -1,0 +1,169 @@
+# Porting oa3_client
+
+A port gives `VenClient` an HTTP(S) transport, a clock, a log sink and its storage, and calls `loop()` from one task. Everything else (URLs, paging, parsing, backoff, price evaluation) is in the core. `ports/posix` is the reference port; this document adds what an ESP32 port on arduino-esp32 3.x needs.
+
+| Piece | Interface | Header |
+|---|---|---|
+| HTTP(S) | `oa3::HttpTransport` | `oa3/client/http_transport.h` |
+| Wall and monotonic time | `oa3::Clock` | `oa3/client/clock.h` |
+| Log | `oa3::LogSink` (`LogFn` + `void* ctx` + `max_level`) | `oa3/client/log.h` |
+| Event arrays and JSON arena | `oa3::VenStorage` | `oa3/client/ven_client.h` |
+| Task | calls `VenClient::loop()` | |
+
+## HttpTransport
+
+`get(request, on_response, ctx)` performs one GET and returns once the connection is closed. The contract:
+
+- One request at a time, and no connection outlives `get()`. On the classic ESP32 a TLS session costs 42-45 KB of internal RAM and a second one does not fit, so the port opens a connection per request and closes it before returning. The client makes at most one request per `loop()` and pages `/programs` and `/events` over successive calls, so it never asks for a second connection while one is open.
+- `request.url` is absolute and already percent-encoded, at most `OA3_URL_MAX` (511) characters. Send every entry of `request.headers` (today `Accept: application/json`; a bearer token will arrive the same way). `request.timeout_ms` bounds the whole request (default 15,000 from `VenConfig::http_timeout_ms`); 0 leaves it to the transport.
+- Once a status line arrives, call `on_response(ctx, status, body)` exactly once, for any status, before `get()` returns. `body` is an `oa3::ByteReader` over the response body with any chunked encoding removed; `read()` returns -1 at its end. The handler may stop reading early; the transport then discards the rest by closing the connection. `body` is valid only during the call.
+- Return `kOk` when the handler ran and the body was delivered in full or abandoned by the handler. Otherwise return the failure: `kInvalidUrl`, `kDnsFailed`, `kConnectFailed`, `kTlsFailed`, `kTimeout`, `kTooLarge` or `kIoError` (anything else, including a body cut short). After a failure the client discards whatever the handler parsed, so a transport may call the handler and still fail, for example when the deadline passes mid-body.
+- `post()` has a default that returns `kUnsupported`. Leave it alone: the client sends no POST until VTN authentication (token and `/vens`) is added in a later release.
+
+The transport needs no body buffer: the parser reads the stream directly, one top-level JSON object at a time, into the arena.
+
+### arduino-esp32 3.x: HTTPClient and NetworkClientSecure
+
+Keep one `NetworkClientSecure` and one `HTTPClient` as members of the transport, and per `get()`:
+
+1. `secure.setCACert(pem)` once at init, with the PEM of the VTN's root (for the price server, the Amazon RSA 2048 chain's root; esp32-firmware stores it at `/certs/priceGrid-coordinationEnergy.ca`). `setInsecure()` only behind an explicit opt-in. `secure.setHandshakeTimeout(seconds)` takes seconds.
+2. `http.begin(secure, url)`; `http.useHTTP10(true)`, which also turns off keep-alive in this version (`_reuse = !useHTTP10`) and keeps the server from sending a chunked body that `getStream()` would deliver raw; `http.setConnectTimeout(ms)`; `http.setTimeout(ms)` (a `uint16_t`, so at most 65,535 ms, applied per read); `http.addHeader(name, value)` for each request header.
+3. `int code = http.GET()`. A negative code is a failure: `HTTPC_ERROR_CONNECTION_REFUSED` (-1) covers DNS, TCP and TLS failures alike (`connect()` returning false), so map it to `kConnectFailed`; `HTTPC_ERROR_READ_TIMEOUT` (-11) to `kTimeout`; any other to `kIoError`.
+4. For a positive code, wrap `http.getStream()` in a `ByteReader` and call `on_response(ctx, code, reader)`. The price server sends no Content-Length under HTTP/1.0, so the body ends when the server closes the connection; when `http.getSize()` is not -1, stop after that many bytes.
+5. `http.end()`, which closes the connection and frees the TLS session, on every path. Return `kTimeout` if the reader hit the deadline, else `kOk`.
+
+A reader for step 4, with the deadline taken from `request.timeout_ms`:
+
+```cpp
+class StreamReader final : public oa3::ByteReader {
+public:
+    StreamReader(NetworkClient& s, int size, uint32_t deadline_ms)
+        : _s(s), _left(size), _deadline(deadline_ms) {}
+    int read() override {
+        char c;
+        return readBytes(&c, 1) == 1 ? static_cast<unsigned char>(c) : -1;
+    }
+    size_t readBytes(char* buf, size_t len) override {
+        size_t n = 0;
+        while (n < len && _left != 0) {
+            const int avail = _s.available();
+            if (avail > 0) {
+                size_t want = len - n;
+                if (_left > 0 && want > static_cast<size_t>(_left)) want = _left;
+                const int got = _s.read(reinterpret_cast<uint8_t*>(buf + n), want);
+                if (got > 0) {
+                    n += got;
+                    if (_left > 0) _left -= got;
+                }
+            } else if (!_s.connected()) {
+                break;
+            } else if (static_cast<int32_t>(millis() - _deadline) >= 0) {
+                timed_out = true;
+                break;
+            } else {
+                delay(1);
+            }
+        }
+        return n;
+    }
+    bool timed_out = false;
+
+private:
+    NetworkClient& _s;
+    int _left;  // -1: until the connection closes
+    uint32_t _deadline;
+};
+```
+
+## Clock
+
+`now(DateTime* out)` returns the UTC instant, or false while the wall clock is unset; the client reports `WAITING_FOR_CLOCK` and makes no request until it is true, because every fetch window starts at `now`. On the ESP32, return false until SNTP has synchronized (`esp_sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED` once, or `time()` past a floor such as 2020-01-01, as `PosixClock` does), then fill `out` with `oa3::from_unix(tv.tv_sec, tv.tv_usec * 1000, out)` from `gettimeofday()`. Times are UTC throughout; the library has no zone handling.
+
+`monotonic_ms()` is `millis()`: unaffected by SNTP steps, and the client compares differences, so the wrap at 2^32 ms is harmless. When the wall clock moves more than 5 s away from the monotonic one between two `loop()` calls (an SNTP step), the client fetches again so its window covers the new now.
+
+## Log
+
+`VenConfig::log` is a `LogSink`: a function, its `ctx` and a `max_level`; lines above `max_level` are never formatted. Each call gets one NUL-terminated line of at most `OA3_LOG_LINE_MAX` (159) characters with no newline, valid only during the call, on the task that runs `loop()`. Forward it to `Serial` or `ESP_LOGx`; keep it short, because it runs inside the client. A value-initialized sink logs nothing.
+
+## Storage
+
+`VenStorage` is the client's working memory: two `Event` arrays (`events` and `scratch`, `capacity` elements each; a fetch fills `scratch` and swaps on success, so a failure keeps the last good events) and the `JsonArena` the parser uses for one top-level object at a time. An `Event` is about 5.4 KB with the default capacities, so `OA3_MAX_EVENTS=2` costs about 21.6 KB in arrays plus the arena (16 KB by default on a 32-bit target). `StaticVenStorage<>` puts all of it in `.bss`; on the `ci/esp32` build with `OA3_MAX_EVENTS=2` it is 38,016 bytes.
+
+On a board with PSRAM, allocate it there once at init and never free it:
+
+```cpp
+#include <esp_heap_caps.h>
+
+const size_t n = OA3_MAX_EVENTS;
+const size_t arena_size = OA3_JSON_ARENA_SIZE;
+auto* events = static_cast<oa3::Event*>(heap_caps_malloc(2 * n * sizeof(oa3::Event), MALLOC_CAP_SPIRAM));
+void* arena_buf = heap_caps_malloc(arena_size, MALLOC_CAP_SPIRAM);
+static oa3::JsonArena arena(arena_buf, arena_size);
+const oa3::VenStorage storage{events, events + n, n, &arena};
+```
+
+Without PSRAM, use `StaticVenStorage<>` and leave the internal heap to the TLS session. After a fetch, `arena.high_water()` shows how much of the arena one event needed; shrink `OA3_JSON_ARENA_SIZE` toward it, with margin, if RAM is short.
+
+## Sizing for 24 h
+
+For one price-server program (one event per day of 24 hourly intervals, 23 or 25 on DST days, about 10 KB per `/events` response):
+
+| Setting | Value |
+|---|---|
+| `VenConfig::horizon` | `PT24H` (the default) |
+| `-DOA3_MAX_EVENTS` | 2: a 24 h window overlaps at most two daily events |
+| `OA3_MAX_INTERVALS` | 25 (the default) |
+| `OA3_JSON_ARENA_SIZE` | 16 KB (the 32-bit default) |
+| `VenConfig::poll_period_s` | 900 (the default); the price changes at interval boundaries without a request |
+
+A device that needs a longer view raises both: a 72 h window needs `OA3_MAX_EVENTS` 4. When more events overlap the window than fit, the earliest are kept and the status is `TRUNCATED`.
+
+## Task
+
+Run the client on a FreeRTOS task of its own with at least 6 KB of stack; 8 KB is the recommendation. In the M2 spike the loop task bottomed at 2.6 KB free of 8 KB during GET and parse. The parse runs inside the transport's `get()`, below `HTTPClient` and the TLS read: on xtensa the events-response path takes about 2.0 KB and ArduinoJson adds about 112 bytes per nesting level (about 1.1 KB at the default limit of 10). Check `uxTaskGetStackHighWaterMark()` on the device after the first fetch.
+
+`VenClient` is not thread-safe, and every callback runs inside `loop()` on this task. Another task asks for an early fetch by sending a message the OA3 task turns into `request_poll()`; the price goes out by copying `PriceInfo` into a queue from `on_price_change`. A `loop()` that makes a request blocks for up to `http_timeout_ms`; otherwise it returns at once. Sleep for `ms_until_due()`, capped so that queued messages are seen.
+
+On the classic ESP32, nothing else may hold a TLS session while the client fetches: close MQTTS before the request, or schedule it between requests.
+
+## Minimal wiring
+
+```cpp
+#include <oa3/client/ven_client.h>
+
+static ArduinoHttpTransport http;  // the HttpTransport above
+static SntpClock clock_;           // the Clock above
+static oa3::StaticVenStorage<> storage;
+static oa3::VenClient client(http, clock_, storage.storage());
+
+static void on_price(void*, const oa3::PriceInfo& p) {
+    if (p.active) Serial.printf("price %s %s/%s\n", p.text, p.currency, p.units);
+    else Serial.println("no price in force");
+}
+
+static void on_log(void*, oa3::LogLevel level, const char* line) {
+    Serial.printf("oa3 %s %s\n", oa3::to_string(level), line);
+}
+
+static void oa3_task(void*) {
+    oa3::VenConfig c{};
+    c.base_url = "https://price.grid-coordination.energy/openadr3/3.1.0";
+    c.program_name = "EELEC-012041131";
+    c.on_price_change = on_price;
+    c.log = oa3::LogSink{on_log, nullptr, oa3::LogLevel::kInfo};
+    if (!client.start(c)) vTaskDelete(nullptr);
+    for (;;) {
+        client.loop();
+        uint32_t wait = client.ms_until_due();
+        if (wait > 1000) wait = 1000;
+        vTaskDelay(pdMS_TO_TICKS(wait) + 1);
+    }
+}
+
+void setup() {
+    // Wi-Fi or Ethernet up, configTime(0, 0, "pool.ntp.org"), CA loaded into the transport.
+    xTaskCreatePinnedToCore(oa3_task, "oa3", 8192, nullptr, 1, nullptr, 1);
+}
+```
+
+`start()` copies the configuration's strings and returns false for an invalid one: no base URL or program, a URL that cannot fit `OA3_URL_MAX` with the longest id and targets, a `program_id` that is not a spec objectID, a poll or backoff period above 2,000,000 s, or `stale_after_polls * poll_period_s` at or above 2^31 ms.

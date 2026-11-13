@@ -66,3 +66,36 @@ jobs:
 
       - name: Build
         run: pio run -d ci/esp32
+
+  # The POSIX port (ports/posix): the client over libcurl, its demo program, and tests
+  # against an HTTP server each test starts on a loopback port. The live price-server test
+  # (-DOA3_POSIX_LIVE_TESTS=ON) is not run here.
+  posix-port:
+    name: POSIX port (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cc: gcc
+            cxx: g++
+          - cc: clang
+            cxx: clang++
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libcurl
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+
+      - name: Configure
+        run: >
+          cmake -S ports/posix -B build-posix
+          -DCMAKE_C_COMPILER=${{ matrix.cc }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DOA3_POSIX_WERROR=ON
+
+      - name: Build
+        run: cmake --build build-posix -j
+
+      - name: Test
+        run: ctest --test-dir build-posix --output-on-failure

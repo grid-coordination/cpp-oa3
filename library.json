@@ -21,7 +21,11 @@
     "includeDir": "model/include",
     "srcDir": ".",
     "srcFilter": [
-      "+<model/src/>"
+      "+<model/src/>",
+      "+<client/src/>"
+    ],
+    "flags": [
+      "-I client/include"
     ]
   }
 }

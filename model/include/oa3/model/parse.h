@@ -33,6 +33,12 @@ struct ParseOptions {
     // kept after a dropped one. An event with no resolvable interval period is kept. nullptr
     // keeps everything; an end before the start is kInvalidField.
     const TimeInterval* window;
+    // parse_events and append_events skip, without using a slot, an event whose programID is
+    // present and differs from program_id (when non-null), and one that targets_match()
+    // rejects against ven_targets (when non-null).
+    const char* program_id = nullptr;
+    const char* const* ven_targets = nullptr;
+    size_t ven_target_count = 0;
 };
 
 // Each function fills *out from scratch. Keys are read in camelCase or in VTN-RI snake_case
@@ -50,6 +56,17 @@ ParseResult parse_programs(const char* json, size_t len, JsonArena& arena, Progr
 ParseResult parse_programs(ByteReader& in, JsonArena& arena, Program* out, size_t capacity,
                            size_t* count, const ParseOptions* options = nullptr);
 
+// Scans a /programs response for the program whose programName equals name, without storing
+// the others: an element with another, missing or oversized programName is skipped unchecked.
+// *found and *out are set on a match, and scanning continues to the end of the array.
+// *scanned is the number of array elements read, also on failure, so a caller can tell the
+// last page (fewer than its limit).
+ParseResult find_program(const char* json, size_t len, JsonArena& arena, const char* name,
+                         Program* out, bool* found, size_t* scanned,
+                         const ParseOptions* options = nullptr);
+ParseResult find_program(ByteReader& in, JsonArena& arena, const char* name, Program* out,
+                         bool* found, size_t* scanned, const ParseOptions* options = nullptr);
+
 ParseResult parse_event(const char* json, size_t len, JsonArena& arena, Event* out,
                         const ParseOptions* options = nullptr);
 ParseResult parse_event(ByteReader& in, JsonArena& arena, Event* out,
@@ -61,6 +78,15 @@ ParseResult parse_events(const char* json, size_t len, JsonArena& arena, Event* 
                          size_t capacity, size_t* count, const ParseOptions* options = nullptr);
 ParseResult parse_events(ByteReader& in, JsonArena& arena, Event* out, size_t capacity,
                          size_t* count, const ParseOptions* options = nullptr);
+
+// As parse_events, but keeps the *count events already in out and adds to them, so the pages
+// of one /events query can be read into one array. *scanned is the number of array elements
+// read, also on failure, so a caller can tell the last page (fewer than its limit).
+ParseResult append_events(const char* json, size_t len, JsonArena& arena, Event* out,
+                          size_t capacity, size_t* count, size_t* scanned,
+                          const ParseOptions* options = nullptr);
+ParseResult append_events(ByteReader& in, JsonArena& arena, Event* out, size_t capacity,
+                          size_t* count, size_t* scanned, const ParseOptions* options = nullptr);
 
 ParseResult parse_notification(const char* json, size_t len, JsonArena& arena,
                                Notification* out, const ParseOptions* options = nullptr);
