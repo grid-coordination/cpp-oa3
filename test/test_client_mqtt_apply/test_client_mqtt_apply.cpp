@@ -91,7 +91,8 @@ static void test_post_and_put_read_as_create_and_update() {
     push_event(0, "POST", "e2", "2026-11-13T21:00:00Z", "0.2");
     push_event(1, "PUT", "e1", "2026-11-13T20:00:00Z", "0.3");
     rig.client.loop();
-    assert_ids("e1", "e2");
+    // An update moves the event to the end: storage order is arrival order.
+    assert_ids("e2", "e1");
     TEST_ASSERT_EQUAL_STRING("0.3", rig.client.price().text);
     TEST_ASSERT_EQUAL_UINT32(2, rig.client.status().notifications);
 }
@@ -128,6 +129,9 @@ static void test_stale_update_ignored() {
     TEST_ASSERT_EQUAL_STRING("0.1", rig.client.price().text);
     TEST_ASSERT_EQUAL_UINT32(0, rig.client.status().notifications);
     push_event(1, "UPDATE", "e1", "2026-11-13T20:00:00Z", "0.5", "2026-11-12T22:00:00Z");
+    rig.client.loop();
+    TEST_ASSERT_EQUAL_STRING("0.1", rig.client.price().text);
+    push_event(2, "UPDATE", "e1", "2026-11-13T20:00:00Z", "0.5", "2026-11-12T22:00:01Z");
     rig.client.loop();
     TEST_ASSERT_EQUAL_STRING("0.5", rig.client.price().text);
 }

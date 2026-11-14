@@ -64,6 +64,28 @@ constexpr uint64_t kMaxDelayMs = 0x7FFFFFFF;
 // A wall clock that moves this much more or less than the monotonic one has been stepped.
 constexpr int64_t kClockStepMs = 5000;
 
+constexpr DateTime kNever{INT64_MAX, 0, 0};
+
+bool is_never(const DateTime& t) { return t.seconds == INT64_MAX; }
+
+void lower(DateTime* t, const DateTime& candidate) {
+    if (compare(candidate, *t) < 0) {
+        *t = candidate;
+    }
+}
+
+// From a to b in whole milliseconds, rounded up; 0 when b is not after a, and UINT32_MAX when
+// at least that far.
+uint32_t ms_until(const DateTime& a, const DateTime& b) {
+    const int64_t secs = b.seconds - a.seconds;
+    if (secs >= static_cast<int64_t>(UINT32_MAX / 1000)) {
+        return UINT32_MAX;
+    }
+    const int64_t ns =
+        secs * 1000000000 + static_cast<int64_t>(b.nanos) - static_cast<int64_t>(a.nanos);
+    return ns <= 0 ? 0 : static_cast<uint32_t>((ns + 999999) / 1000000);
+}
+
 const HttpHeader kHeaders[] = {{"Accept", "application/json"}};
 
 bool is_2xx(int status) { return status >= 200 && status <= 299; }
@@ -195,12 +217,14 @@ VenClient::VenClient(HttpTransport& http, Clock& clock, const VenStorage& storag
       _scratch_count(0),
       _events_dirty(false),
       _due_now(false),
+      _poll_off(false),
       _stale(false),
       _has_last_loop(false),
       _last_loop_ms(0),
       _last_loop_wall(),
       _next_request_ms(0),
       _last_success_ms(0),
+      _current_ms(0),
       _last_fetch(),
       _has_fetch(false),
       _data_changed(false),
@@ -220,6 +244,9 @@ VenClient::VenClient(HttpTransport& http, Clock& clock, const VenStorage& storag
       _response_scanned(0),
       _window(),
       _options(),
+      _later_start(kNever),
+      _fetch_later(kNever),
+      _free_at(kNever),
       _mqtt(mqtt),
       _client_id(),
       _mqtt_uri(),
@@ -235,7 +262,8 @@ VenClient::VenClient(HttpTransport& http, Clock& clock, const VenStorage& storag
       _reported_notify(NotifyState::kOff),
       _program_deleted(false),
       _has_msg_window(false),
-      _msg_window() {}
+      _msg_window(),
+      _msg_later(kNever) {}
 
 bool VenClient::start(const VenConfig& config) {
     mqtt_reset();
@@ -284,8 +312,9 @@ bool VenClient::start(const VenConfig& config) {
         if (id_len == 0 || id_len > OA3_MQTT_CLIENT_ID_MAX) {
             return false;
         }
-        if (config.notify_poll_period_s < config.poll_period_s ||
-            config.notify_poll_period_s > kMaxPeriodS) {
+        if (config.notify_poll_period_s != 0 &&
+            (config.notify_poll_period_s < config.poll_period_s ||
+             config.notify_poll_period_s > kMaxPeriodS)) {
             return false;
         }
         if (static_cast<uint64_t>(config.stale_after_polls) * config.notify_poll_period_s * 1000 >
@@ -383,10 +412,15 @@ bool VenClient::start(const VenConfig& config) {
     _events_dirty = false;
     ++_events_revision;
     _due_now = true;
+    _poll_off = false;
     _stale = false;
     _has_last_loop = false;
     _next_request_ms = 0;
     _last_success_ms = 0;
+    _current_ms = 0;
+    _later_start = kNever;
+    _fetch_later = kNever;
+    _free_at = kNever;
     _last_fetch = DateTime{};
     _has_fetch = false;
     _data_changed = false;
@@ -441,6 +475,9 @@ uint32_t VenClient::ms_until_request(uint32_t now_ms) const {
     if (_due_now) {
         return 0;
     }
+    if (_poll_off) {
+        return UINT32_MAX;
+    }
     const int32_t d = static_cast<int32_t>(_next_request_ms - now_ms);
     return d <= 0 ? 0 : static_cast<uint32_t>(d);
 }
@@ -472,14 +509,27 @@ uint32_t VenClient::ms_until_due() const {
         return 0;
     }
     if (_price.has_next_change) {
-        const int64_t secs = _price.next_change.seconds - now.seconds;
-        if (secs < static_cast<int64_t>(UINT32_MAX / 1000)) {
-            const int64_t ns = secs * 1000000000 + static_cast<int64_t>(_price.next_change.nanos) -
-                               static_cast<int64_t>(now.nanos);
-            const int64_t ms = ns <= 0 ? 0 : (ns + 999999) / 1000000;
-            if (ms < due) {
-                due = static_cast<uint32_t>(ms);
-            }
+        const uint32_t ms = ms_until(now, _price.next_change);
+        if (ms < due) {
+            due = ms;
+        }
+    }
+    TimeInterval w;
+    if (_config.notifications == NotificationMode::kMqtt && !is_never(_later_start) &&
+        make_interval(now, _config.horizon, &w) && !w.end_indefinite) {
+        // Due once the window end has passed the start, not when it reaches it.
+        uint32_t ms = ms_until(w.end, _later_start);
+        if (compare(w.end, _later_start) <= 0 && ms < UINT32_MAX) {
+            ++ms;
+        }
+        if (ms < due) {
+            due = ms;
+        }
+    }
+    if (_config.notifications == NotificationMode::kMqtt && !is_never(_free_at)) {
+        const uint32_t ms = ms_until(now, _free_at);
+        if (ms < due) {
+            due = ms;
         }
     }
     return due;
@@ -578,6 +628,7 @@ bool VenClient::fail(VenStatus kind, uint32_t now_ms) {
     }
     const uint32_t delay_s = backoff_ms(_status.consecutive_failures) / 1000;
     _next_request_ms = now_ms + delay_s * 1000;
+    _poll_off = false;
     log_printf(_config.log, LogLevel::kWarn, "%s: http %s %d, parse %s, failures %u, retry in %lu s",
                to_string(kind), to_string(_status.http_result), _status.http_status,
                to_string(_status.parse_result),
@@ -606,6 +657,7 @@ void VenClient::not_found(uint32_t now_ms) {
     _skip = 0;
     _pages = 0;
     _next_request_ms = now_ms + _config.poll_period_s * 1000;
+    _poll_off = false;
     log_printf(_config.log, LogLevel::kWarn, "program %s not found",
                _config.program_name != nullptr ? _config.program_name : _config.program_id);
 }
@@ -719,6 +771,8 @@ bool VenClient::poll(const DateTime& now, uint32_t now_ms) {
             _options.ven_targets = _config.targets;
             _options.ven_target_count = _config.target_count;
         }
+        _fetch_later = kNever;
+        _options.later_start = &_fetch_later;
         _scratch_count = 0;
         _event_pages = 0;
         _event_truncated = false;
@@ -762,15 +816,21 @@ bool VenClient::poll(const DateTime& now, uint32_t now_ms) {
         _scratch_count = 0;
     }
     _events_dirty = false;
+    if (_options.window != nullptr) {
+        prune_superseded(_window);
+    }
 
     events_changed();
     _has_fetch = true;
     _last_fetch = now;
     _last_success_ms = now_ms;
+    _current_ms = now_ms;
+    _later_start = _fetch_later;
+    track_free_slot();
     _stale = false;
     _status.consecutive_failures = 0;
     _status.status = _event_truncated ? VenStatus::kTruncated : VenStatus::kOk;
-    _next_request_ms = now_ms + period_s() * 1000;
+    schedule_poll(now_ms);
     log_printf(_config.log, LogLevel::kDebug, "%u events kept, pages %u",
                static_cast<unsigned>(_event_count), static_cast<unsigned>(_event_pages));
     mqtt_after_poll(now_ms);
@@ -909,8 +969,30 @@ void VenClient::loop() {
         }
     }
 
+    if (_phase == Phase::kPolling && _has_fetch && window_entered(now)) {
+        char at[kDateTimeStringSize];
+        format_datetime(_later_start, at, sizeof(at));
+        _later_start = kNever;
+        // After a failure the retry is already scheduled, with backoff.
+        if (!_due_now && _status.consecutive_failures == 0) {
+            log_printf(_config.log, LogLevel::kInfo, "%s comes within the window; fetching events",
+                       at);
+            _due_now = true;
+        }
+    }
+    if (_phase == Phase::kPolling && _has_fetch && slot_freed(now)) {
+        char at[kDateTimeStringSize];
+        format_datetime(_free_at, at, sizeof(at));
+        _free_at = kNever;
+        if (!_due_now && _status.consecutive_failures == 0) {
+            log_printf(_config.log, LogLevel::kInfo,
+                       "events truncated and a slot freed at %s; fetching events", at);
+            _due_now = true;
+        }
+    }
+
     bool failed = false;
-    if (_due_now || reached(now_ms, _next_request_ms)) {
+    if (_due_now || (!_poll_off && reached(now_ms, _next_request_ms))) {
         _due_now = false;
         report(now_ms, false);
         if (_phase == Phase::kStopped) {
@@ -927,10 +1009,18 @@ void VenClient::loop() {
         mqtt_request(now_ms);
     }
 
-    if (_phase == Phase::kPolling && _has_fetch && _config.stale_after_polls > 0) {
+    if (_phase == Phase::kPolling && _has_fetch && subscribed()) {
+        _current_ms = now_ms;
+        if (_stale) {
+            _stale = false;
+            if (_status.status == VenStatus::kStale) {
+                _status.status = _event_truncated ? VenStatus::kTruncated : VenStatus::kOk;
+            }
+        }
+    } else if (_phase == Phase::kPolling && _has_fetch && _config.stale_after_polls > 0) {
         const uint64_t limit_ms =
-            static_cast<uint64_t>(_config.stale_after_polls) * period_s() * 1000;
-        if (_stale || static_cast<uint32_t>(now_ms - _last_success_ms) >= limit_ms) {
+            static_cast<uint64_t>(_config.stale_after_polls) * _config.poll_period_s * 1000;
+        if (_stale || static_cast<uint32_t>(now_ms - _current_ms) >= limit_ms) {
             _stale = true;
             _status.status = VenStatus::kStale;
         }
@@ -946,10 +1036,50 @@ void VenClient::loop() {
 
 // MQTT notifications.
 
+// kSuspended is subscribed too: exclusive_tls closed the session for an HTTPS request, and
+// the broker queues what arrives meanwhile.
+bool VenClient::subscribed() const {
+    return _status.notify == NotifyState::kConnected || _status.notify == NotifyState::kSuspended;
+}
+
 uint32_t VenClient::period_s() const {
-    const bool notified =
-        _status.notify == NotifyState::kConnected || _status.notify == NotifyState::kSuspended;
-    return notified && !_mqtt_no_session ? _config.notify_poll_period_s : _config.poll_period_s;
+    return subscribed() && !_mqtt_no_session ? _config.notify_poll_period_s : _config.poll_period_s;
+}
+
+void VenClient::schedule_poll(uint32_t from_ms) {
+    const uint32_t p = period_s();
+    if (p == 0 && !_poll_off) {
+        log_printf(_config.log, LogLevel::kInfo, "events not polled while subscribed");
+    }
+    _poll_off = p == 0;
+    _next_request_ms = from_ms + p * 1000;
+}
+
+bool VenClient::slot_freed(const DateTime& now) const {
+    return _config.notifications == NotificationMode::kMqtt && !is_never(_free_at) &&
+           compare(now, _free_at) >= 0;
+}
+
+// Under keep-earliest, a slot frees for an event left out when the earliest held one ends.
+void VenClient::track_free_slot() {
+    _free_at = kNever;
+    if (!_event_truncated) {
+        return;
+    }
+    for (size_t k = 0; k < _event_count; ++k) {
+        const EventExtent x = event_extent(_events[k]);
+        if (x.has_period && !x.span.end_indefinite) {
+            lower(&_free_at, x.span.end);
+        }
+    }
+}
+
+// With polling, only while notifications keep the events current between polls.
+bool VenClient::window_entered(const DateTime& now) const {
+    TimeInterval w;
+    return _config.notifications == NotificationMode::kMqtt && !is_never(_later_start) &&
+           make_interval(now, _config.horizon, &w) &&
+           (w.end_indefinite || compare(w.end, _later_start) > 0);
 }
 
 bool VenClient::mqtt_connected_step() const {
@@ -1052,10 +1182,11 @@ void VenClient::mqtt_retry(uint32_t now_ms, bool at_once) {
     _mqtt_next_ms = now_ms + (at_once ? 0 : backoff_ms(_status.mqtt_failures));
     if (_has_fetch) {
         const uint32_t due = _last_success_ms + _config.poll_period_s * 1000;
-        if (static_cast<int32_t>(due - _next_request_ms) < 0) {
+        if (_poll_off || static_cast<int32_t>(due - _next_request_ms) < 0) {
             _next_request_ms = due;
         }
     }
+    _poll_off = false;
 }
 
 void VenClient::mqtt_fail(MqttResult r, uint32_t now_ms) {
@@ -1179,11 +1310,13 @@ void VenClient::mqtt_request(uint32_t now_ms) {
             !mqtt_subscribe(session_present, now_ms)) {
             return;
         }
-        if (clean) {
+        _mqtt_no_session = false;
+        if (clean || !session_present) {
+            log_printf(_config.log, LogLevel::kInfo, "MQTT %s; fetching events after subscribing",
+                       clean ? "clean session" : "session not kept by the broker");
             _mqtt_step = MqttStep::kSnapshotAfter;
             _due_now = true;
         } else {
-            _mqtt_no_session = !session_present;
             mqtt_go_live();
         }
     }
@@ -1250,7 +1383,7 @@ void VenClient::mqtt_go_live() {
     _status.notify = NotifyState::kConnected;
     _status.mqtt_failures = 0;
     if (_has_fetch && _status.consecutive_failures == 0) {
-        _next_request_ms = _last_success_ms + period_s() * 1000;
+        schedule_poll(_last_success_ms);
     }
     log_printf(_config.log, LogLevel::kInfo, "MQTT subscribed to %u topics",
                static_cast<unsigned>(_subscribed_count));
@@ -1315,6 +1448,9 @@ void VenClient::mqtt_service(const DateTime& now, uint32_t now_ms) {
         _pages = 0;
         _event_skip = 0;
         _due_now = true;
+        _poll_off = false;
+        _later_start = kNever;
+        _free_at = kNever;
         _status.status = VenStatus::kResolvingProgram;
         return;
     }
@@ -1351,6 +1487,8 @@ void VenClient::handle_message(const MqttMessage& m) {
     o.payload_type_count = 1;
     o.window = _has_msg_window ? &_msg_window : nullptr;
     o.program_id = _program.id;
+    _msg_later = kNever;
+    o.later_start = &_msg_later;
     BufferReader in(m.payload, m.len);
     const ParseResult r =
         parse_notification(in, *_storage.arena, &_storage.notifications->notification, &o);
@@ -1384,13 +1522,30 @@ void VenClient::remove_event(size_t i) {
     memmove(&_events[i], &_events[i + 1], (_event_count - i) * sizeof(Event));
 }
 
-// False when the stored copy is newer, so nothing changed.
+bool VenClient::prune_superseded(const TimeInterval& window) {
+    bool removed = false;
+    size_t i = 0;
+    while (i < _event_count) {
+        if (superseded(_events[i], i, _events, _event_count, nullptr, window,
+                       _config.payload_type)) {
+            log_printf(_config.log, LogLevel::kDebug, "event %s superseded", _events[i].id);
+            remove_event(i);
+            removed = true;
+            i = 0;
+        } else {
+            ++i;
+        }
+    }
+    return removed;
+}
+
+// False when the stored copy is as new or newer, so nothing changed.
 bool VenClient::upsert_event(const Event& ev) {
     const size_t i = find_event(ev.id);
     const bool stored = i < _event_count;
     if (stored && ev.has_modification_date_time && _events[i].has_modification_date_time &&
-        compare(ev.modification_date_time, _events[i].modification_date_time) < 0) {
-        log_printf(_config.log, LogLevel::kDebug, "event %s: older than the stored copy", ev.id);
+        compare(ev.modification_date_time, _events[i].modification_date_time) <= 0) {
+        log_printf(_config.log, LogLevel::kDebug, "event %s: not newer than the stored copy", ev.id);
         return false;
     }
     const bool targeted = _config.target_count == 0 ||
@@ -1400,19 +1555,46 @@ bool VenClient::upsert_event(const Event& ev) {
     if (_has_msg_window) {
         fit = ev.interval_count == 0 ? WindowFit{false, DateTime{}} : window_fit(ev, _msg_window);
     }
+    if (targeted) {
+        lower(&_later_start, _msg_later);
+        if (!fit.in_window && ev.has_duration && !_msg_window.end_indefinite) {
+            const EventExtent x = event_extent(ev);
+            if (x.has_period && compare(x.span.start, _msg_window.end) >= 0) {
+                lower(&_later_start, x.span.start);
+            }
+        }
+    }
     if (!targeted || !fit.in_window) {
         if (stored) {
             remove_event(i);
         }
         return stored;
     }
+    // Storage order is arrival order, which breaks equal-priority ties.
     if (stored) {
-        _events[i] = ev;
+        remove_event(i);
+        _events[_event_count++] = ev;
         return true;
     }
     if (_event_count < _storage.capacity) {
         _events[_event_count++] = ev;
         return true;
+    }
+    if (_has_msg_window) {
+        for (size_t k = 0; k < _event_count; ++k) {
+            if (superseded(_events[k], k, _events, _event_count, &ev, _msg_window,
+                           _config.payload_type)) {
+                log_printf(_config.log, LogLevel::kDebug, "event %s superseded", _events[k].id);
+                remove_event(k);
+                _events[_event_count++] = ev;
+                return true;
+            }
+        }
+        if (superseded(ev, _event_count, _events, _event_count, nullptr, _msg_window,
+                       _config.payload_type)) {
+            log_printf(_config.log, LogLevel::kDebug, "event %s superseded", ev.id);
+            return false;
+        }
     }
     _event_truncated = true;
     _status.status = VenStatus::kTruncated;
@@ -1476,8 +1658,19 @@ void VenClient::apply_notification(bool retained) {
         log_printf(_config.log, LogLevel::kInfo, "notification %s event %s%s", to_string(n.operation),
                    ev.id, changed ? "" : ", no change");
         if (changed) {
+            if (_has_msg_window) {
+                prune_superseded(_msg_window);
+            }
             events_changed();
             ++_status.notifications;
+        }
+        // A slot free while truncated takes an event left out: fetch now.
+        if (changed && _event_truncated && _event_count < _storage.capacity && _has_msg_window) {
+            _free_at = _msg_window.start;
+        } else if (_event_truncated) {
+            const DateTime before = _free_at;
+            track_free_slot();
+            lower(&_free_at, before);
         }
         return;
     }

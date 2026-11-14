@@ -432,18 +432,20 @@ inline oa3::VenStorage with_notifications(oa3::VenStorage s, oa3::NotificationSt
     return s;
 }
 
-// The client under test, its fakes and a flow that takes it to NotifyState::kConnected.
-struct MqttRig {
+// The client under test, its fakes and a flow that takes it to NotifyState::kConnected; N
+// event slots.
+template <size_t N = OA3_MAX_EVENTS>
+struct MqttRigN {
     FakeTransport http;
     FakeClock clk;
     Recorder rec;
     FakeMqttSession mqtt;
-    oa3::StaticVenStorage<> storage;
+    oa3::StaticVenStorage<N> storage;
     oa3::NotificationStorage notes;
     oa3::VenClient client;
-    char events[2048];
+    char events[4096];
 
-    MqttRig() : client(http, clk, with_notifications(storage.storage(), &notes), &mqtt) {}
+    MqttRigN() : client(http, clk, with_notifications(storage.storage(), &notes), &mqtt) {}
 
     // The default /events body: one event e1 at 20:00Z, price 0.1.
     void reset() {
@@ -502,5 +504,7 @@ struct MqttRig {
         TEST_ASSERT_EQUAL_size_t(0, http.unexpected);
     }
 };
+
+using MqttRig = MqttRigN<>;
 
 }  // namespace fakes

@@ -721,7 +721,7 @@ static void test_absent_priority_ranks_below_present() {
     TEST_ASSERT_EQUAL_PTR(&some, p.event);
 }
 
-static void test_equal_priority_lower_index_wins() {
+static void test_equal_priority_later_index_wins() {
     for (int i = 0; i < 2; ++i) {
         g_events[i].has_priority = true;
         g_events[i].priority = 0;
@@ -729,7 +729,7 @@ static void test_equal_priority_lower_index_wins() {
     }
     PriceAt p;
     TEST_ASSERT_TRUE(oa3::price_at(g_events, 2, ux("2025-06-25T00:30:00Z"), "PRICE", &p));
-    TEST_ASSERT_EQUAL_PTR(&g_events[0], p.event);
+    TEST_ASSERT_EQUAL_PTR(&g_events[1], p.event);
 
     memset(g_events, 0, sizeof(g_events));
     add_price(g_events[0], 0, "2025-06-25T00:00:00Z", "PT2H", 1.0);
@@ -964,7 +964,7 @@ int main() {
     RUN_TEST(test_gap_next_change_is_next_start);
     RUN_TEST(test_priority_overlap);
     RUN_TEST(test_absent_priority_ranks_below_present);
-    RUN_TEST(test_equal_priority_lower_index_wins);
+    RUN_TEST(test_equal_priority_later_index_wins);
     RUN_TEST(test_event_duration_shortens);
     RUN_TEST(test_event_duration_clips_mid_interval);
     RUN_TEST(test_event_duration_p9999y_loops);

@@ -29,18 +29,20 @@ static void push_discovery() {
     rig.http.push_ok(fakes::kProgramTopicsBody, "/topics/programs/");
 }
 
+// Snapshots before connecting and, as the broker held no session, after subscribing.
 static void go_live() {
     rig.start(config());
     push_discovery();
+    rig.http.push_ok(rig.events, "/events?");
     rig.http.push_ok(rig.events, "/events?");
     for (int i = 0; i < 8 && rig.client.status().notify != NotifyState::kConnected; ++i) {
         rig.client.loop();
     }
     ASSERT_NOTIFY(NotifyState::kConnected, rig.client.status().notify);
-    TEST_ASSERT_EQUAL_size_t(6, rig.http.requests);
+    TEST_ASSERT_EQUAL_size_t(7, rig.http.requests);
 }
 
-static void test_snapshot_before_connect() {
+static void test_snapshot_before_connect_and_after_new_session() {
     rig.start(config());
     push_discovery();
     rig.http.push_ok(rig.events, "/events?");
@@ -57,13 +59,27 @@ static void test_snapshot_before_connect() {
     TEST_ASSERT_EQUAL_size_t(1, rig.mqtt.connects);
     TEST_ASSERT_FALSE(rig.mqtt.last.clean_session);
     TEST_ASSERT_TRUE(rig.mqtt.last.tls);
-    ASSERT_NOTIFY(NotifyState::kConnected, rig.client.status().notify);
-    TEST_ASSERT_EQUAL_size_t(6, rig.http.requests);
     TEST_ASSERT_EQUAL_size_t(2, rig.client.subscription_count());
+    // The broker kept no session, so what was published between the snapshot and the
+    // subscription is fetched: one suspend, fetch and resume.
+    ASSERT_NOTIFY(NotifyState::kConnecting, rig.client.status().notify);
+    TEST_ASSERT_EQUAL_size_t(6, rig.http.requests);
+    rig.http.push_ok(rig.events, "/events?");
+    rig.client.loop();
+    TEST_ASSERT_EQUAL_size_t(7, rig.http.requests);
+    ASSERT_NOTIFY(NotifyState::kSuspended, rig.client.status().notify);
+    rig.client.loop();
+    TEST_ASSERT_EQUAL_size_t(2, rig.mqtt.connects);
+    ASSERT_NOTIFY(NotifyState::kConnected, rig.client.status().notify);
+    TEST_ASSERT_EQUAL_size_t(7, rig.http.requests);
     TEST_ASSERT_EQUAL_size_t(0, rig.http.gets_while_connected);
-    // A new session holds nothing published before it, so the fast period stays until a
-    // resume finds the session kept.
-    TEST_ASSERT_EQUAL_UINT32(900000, rig.client.status().retry_in_ms);
+    TEST_ASSERT_EQUAL_size_t(0, rig.http.unexpected);
+    TEST_ASSERT_EQUAL_UINT32(3600000, rig.client.status().retry_in_ms);
+    for (int i = 0; i < 4; ++i) {
+        rig.clk.advance_s(60);
+        rig.client.loop();
+    }
+    TEST_ASSERT_EQUAL_size_t(7, rig.http.requests);
 }
 
 static void test_suspend_and_resume_around_fallback_poll() {
@@ -72,7 +88,7 @@ static void test_suspend_and_resume_around_fallback_poll() {
     rig.clk.advance_s(3600);
     rig.http.push_ok(rig.events, "/events?");
     rig.client.loop();
-    TEST_ASSERT_EQUAL_size_t(7, rig.http.requests);
+    TEST_ASSERT_EQUAL_size_t(8, rig.http.requests);
     TEST_ASSERT_FALSE(rig.mqtt.connected());
     ASSERT_NOTIFY(NotifyState::kSuspended, rig.client.status().notify);
     TEST_ASSERT_EQUAL_STRING("D", rig.mqtt.call(calls));
@@ -85,7 +101,7 @@ static void test_suspend_and_resume_around_fallback_poll() {
     TEST_ASSERT_FALSE(rig.mqtt.last.clean_session);
     ASSERT_NOTIFY(NotifyState::kConnected, rig.client.status().notify);
     TEST_ASSERT_EQUAL_UINT32(3600000, rig.client.status().retry_in_ms);
-    TEST_ASSERT_EQUAL_size_t(7, rig.http.requests);
+    TEST_ASSERT_EQUAL_size_t(8, rig.http.requests);
     TEST_ASSERT_EQUAL_size_t(0, rig.http.gets_while_connected);
 }
 
@@ -95,7 +111,7 @@ static void test_request_poll_suspends() {
     rig.http.push_ok(rig.events, "/events?");
     rig.client.loop();
     rig.client.loop();
-    TEST_ASSERT_EQUAL_size_t(7, rig.http.requests);
+    TEST_ASSERT_EQUAL_size_t(8, rig.http.requests);
     TEST_ASSERT_EQUAL_size_t(0, rig.http.gets_while_connected);
     ASSERT_NOTIFY(NotifyState::kConnected, rig.client.status().notify);
 }
@@ -118,7 +134,7 @@ static void test_no_resume_between_pages() {
     rig.client.loop();
     ASSERT_NOTIFY(NotifyState::kSuspended, rig.client.status().notify);
     rig.client.loop();
-    TEST_ASSERT_EQUAL_size_t(8, rig.http.requests);
+    TEST_ASSERT_EQUAL_size_t(9, rig.http.requests);
     TEST_ASSERT_EQUAL_size_t(connects, rig.mqtt.connects);
     TEST_ASSERT_EQUAL_size_t(0, rig.http.unexpected);
     rig.client.loop();
@@ -142,7 +158,7 @@ static void test_resume_without_session_resubscribes_without_snapshot() {
     TEST_ASSERT_EQUAL_STRING(s, rig.mqtt.call(calls + 1));
     TEST_ASSERT_EQUAL_size_t(calls + 3, rig.mqtt.calls);
     ASSERT_NOTIFY(NotifyState::kConnected, rig.client.status().notify);
-    TEST_ASSERT_EQUAL_size_t(7, rig.http.requests);
+    TEST_ASSERT_EQUAL_size_t(8, rig.http.requests);
     TEST_ASSERT_EQUAL_UINT32(900000, rig.client.status().retry_in_ms);
 }
 
@@ -254,7 +270,7 @@ static void test_failed_resume_starts_full_cycle() {
         rig.client.loop();
     }
     ASSERT_NOTIFY(NotifyState::kConnected, rig.client.status().notify);
-    TEST_ASSERT_EQUAL_size_t(11, rig.http.requests);
+    TEST_ASSERT_EQUAL_size_t(12, rig.http.requests);
     TEST_ASSERT_EQUAL_size_t(0, rig.http.unexpected);
     TEST_ASSERT_EQUAL_size_t(0, rig.http.gets_while_connected);
 }
@@ -269,7 +285,7 @@ static void test_no_get_while_connected_over_a_day() {
         }
         rig.client.loop();
     }
-    TEST_ASSERT_EQUAL_size_t(30, rig.http.requests);
+    TEST_ASSERT_EQUAL_size_t(31, rig.http.requests);
     TEST_ASSERT_EQUAL_size_t(0, rig.http.gets_while_connected);
     TEST_ASSERT_EQUAL_size_t(0, rig.http.gets_while_tls_held);
     TEST_ASSERT_EQUAL_size_t(0, rig.http.unexpected);
@@ -295,7 +311,7 @@ static void test_plain_broker_is_not_suspended() {
 
 int main() {
     UNITY_BEGIN();
-    RUN_TEST(test_snapshot_before_connect);
+    RUN_TEST(test_snapshot_before_connect_and_after_new_session);
     RUN_TEST(test_suspend_and_resume_around_fallback_poll);
     RUN_TEST(test_request_poll_suspends);
     RUN_TEST(test_no_resume_between_pages);

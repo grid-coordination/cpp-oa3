@@ -25,7 +25,8 @@ enum class VenStatus : uint8_t {
     kProgramNotFound,
     kOk,
     kTruncated,  // the last fetch succeeded with more events in the window than fit
-    kStale,      // holding data, but no successful fetch for stale_after_polls poll periods
+    kStale,      // holding data, but not subscribed to notifications and neither a successful
+                 // fetch nor the subscription for stale_after_polls x poll_period_s
     kTransportError,
     kHttpError,
     kParseError,
@@ -41,7 +42,7 @@ enum class NotifyState : uint8_t {
     kUnavailable,   // no MQTT binding, no usable URI, or an auth method the client lacks;
                     // discovery is retried every poll_period_s
     kConnecting,    // topics in hand; connecting, subscribing, or snapshotting /events
-    kConnected,     // subscribed; events are polled every notify_poll_period_s
+    kConnected,     // subscribed; events are polled every notify_poll_period_s, or not at all
     kSuspended,     // exclusive_tls: closed for an HTTPS request, resumed after it
     kDisconnected,  // lost or failed; a new cycle starts after backoff
 };
@@ -54,7 +55,8 @@ struct VenStatusInfo {
     int http_status;           // of the last response; 0 when none
     ParseResult parse_result;  // of the last parse; kOk before the first
     uint16_t consecutive_failures;
-    uint32_t retry_in_ms;  // until the next request, as of this report
+    uint32_t retry_in_ms;  // until the next request, as of this report; UINT32_MAX when none is
+                           // scheduled (subscribed with notify_poll_period_s 0)
     bool has_data;         // events from a successful fetch are held
     NotifyState notify;
     MqttResult mqtt_result;  // of the last MQTT call; kOk before the first
@@ -113,14 +115,19 @@ struct VenConfig {
 
     // kMqtt needs an MqttSession and VenStorage::notification. After the program resolves:
     // GET /notifiers, the program's events and program topics, connect, subscribe, and
-    // snapshot /events; again on every connect that does not resume a session.
+    // snapshot /events once subscribed. Every connection loss starts this cycle again. Events
+    // are also fetched once an event or interval left out for starting beyond now + horizon
+    // comes within it, and, while truncated, once a held event ends or a notification frees a
+    // slot.
     NotificationMode notifications = NotificationMode::kOff;
-    // The poll period while subscribed; at least poll_period_s.
+    // The poll period while subscribed: 0 (no polling while subscribed) or at least
+    // poll_period_s.
     uint32_t notify_poll_period_s = 3600;
     // At most one TLS session at a time (the classic ESP32): an MQTTS session is closed
     // before each HTTPS request and resumed after it, with clean_session false and QoS 1 so
-    // the broker queues what arrives meanwhile. Until a resume finds the broker kept the
-    // session, events are polled every poll_period_s.
+    // the broker queues what arrives meanwhile. /events is fetched before connecting, and
+    // again after subscribing when the broker kept no session. Until a resume finds the broker
+    // kept the session, events are polled every poll_period_s.
     bool exclusive_tls = false;
     const char* mqtt_client_id = nullptr;  // required with kMqtt
     // Used instead of the /notifiers URIs, e.g. for a VTN that advertises an unreachable one.
@@ -274,6 +281,11 @@ private:
     void update_price(const DateTime& now);
     void report(uint32_t now_ms, bool force);
     uint32_t period_s() const;
+    void schedule_poll(uint32_t from_ms);
+    bool subscribed() const;
+    bool window_entered(const DateTime& now) const;
+    bool slot_freed(const DateTime& now) const;
+    void track_free_slot();
     uint32_t backoff_ms(uint16_t failures) const;
     bool mqtt_connected_step() const;
     bool mqtt_timed_step() const;
@@ -299,6 +311,7 @@ private:
     void apply_notification(bool retained);
     bool upsert_event(const Event& ev);
     void remove_event(size_t i);
+    bool prune_superseded(const TimeInterval& window);
     void events_changed();
     size_t find_event(const char* id) const;
 
@@ -331,12 +344,14 @@ private:
     bool _events_dirty;  // single buffer: a fetch has begun to parse into _events
 
     bool _due_now;
+    bool _poll_off;  // subscribed with notify_poll_period_s 0: _next_request_ms is unused
     bool _stale;
     bool _has_last_loop;
     uint32_t _last_loop_ms;
     DateTime _last_loop_wall;
     uint32_t _next_request_ms;
     uint32_t _last_success_ms;
+    uint32_t _current_ms;  // the last successful fetch, or later while subscribed
     DateTime _last_fetch;
     bool _has_fetch;
     bool _data_changed;
@@ -358,6 +373,13 @@ private:
     size_t _response_scanned;
     TimeInterval _window;
     ParseOptions _options;
+    // The earliest start left out for lying beyond the window: of the events held, and of the
+    // fetch in progress. {INT64_MAX, 0, 0} when none.
+    DateTime _later_start;
+    DateTime _fetch_later;
+    // Truncated: the earliest end of the events held, when a slot frees for an event left out.
+    // {INT64_MAX, 0, 0} when not truncated.
+    DateTime _free_at;
     char _url[OA3_URL_MAX + 1];
 
     MqttSession* _mqtt;
@@ -376,6 +398,7 @@ private:
     bool _program_deleted;  // set by a notification, acted on once poll() returns
     bool _has_msg_window;
     TimeInterval _msg_window;  // [now, now + horizon) of the loop() delivering messages
+    DateTime _msg_later;       // _later_start of the notification being applied
 };
 
 }  // namespace oa3

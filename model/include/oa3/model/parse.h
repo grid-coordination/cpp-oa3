@@ -39,6 +39,10 @@ struct ParseOptions {
     const char* program_id = nullptr;
     const char* const* ven_targets = nullptr;
     size_t ven_target_count = 0;
+    // With a window that has an end: lowered to the start of each interval, or looping event,
+    // left out for starting at or after that end, when earlier. The caller sets it first, e.g.
+    // to {INT64_MAX, 0, 0}.
+    DateTime* later_start = nullptr;
 };
 
 // Each function fills *out from scratch. Keys are read in camelCase or in VTN-RI snake_case
@@ -73,7 +77,9 @@ ParseResult parse_event(ByteReader& in, JsonArena& arena, Event* out,
                         const ParseOptions* options = nullptr);
 
 // An /events response, as parse_programs. With options->window, kTruncated instead of
-// kCapacityExceeded; kept events stay in arrival order.
+// kCapacityExceeded; kept events stay in arrival order. With a window and one payload type, a
+// full array first drops a held event that superseded() finds covered by the others and the
+// new one, or skips a new one the held events cover; neither is kTruncated.
 ParseResult parse_events(const char* json, size_t len, JsonArena& arena, Event* out,
                          size_t capacity, size_t* count, const ParseOptions* options = nullptr);
 ParseResult parse_events(ByteReader& in, JsonArena& arena, Event* out, size_t capacity,

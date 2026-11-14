@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "supersede.h"
+
 namespace oa3 {
 
 namespace {
@@ -231,9 +233,30 @@ const Payload* payload_of(const Interval& iv, int type) {
 }
 
 // True when a beats b: lower priority number, absent below present.
-bool outranks(const Event& a, const Event& b) {
+bool outranks(const Precedence& a, const Precedence& b) {
     if (a.has_priority != b.has_priority) return a.has_priority;
     return a.has_priority && a.priority < b.priority;
+}
+
+const DateTime kEndless{INT64_MAX, 0, 0};
+
+DateTime end_of(const TimeInterval& iv) { return iv.end_indefinite ? kEndless : iv.end; }
+
+// The part of iv within window; false when they do not meet.
+bool clip(const TimeInterval& iv, const TimeInterval& window, DateTime* start, DateTime* end) {
+    if (!intersects(iv, window)) return false;
+    *start = compare(iv.start, window.start) > 0 ? iv.start : window.start;
+    const DateTime a = end_of(iv);
+    const DateTime b = end_of(window);
+    *end = compare(a, b) < 0 ? a : b;
+    return compare(*start, *end) < 0;
+}
+
+bool priced(const Event& ev, const ResolvedInterval& r, int type) {
+    if (!r.has_period) return false;
+    if (type < 0) return false;
+    const Payload* p = payload_of(ev.intervals[r.index], type);
+    return p != nullptr && p->value_count > 0;
 }
 
 void consider_boundary(const DateTime& t, const DateTime& now, PriceAt* out) {
@@ -313,9 +336,14 @@ bool price_at(const Event* events, size_t event_count, const DateTime& now,
                     if (!span.end_indefinite) consider_boundary(span.end, now, out);
 
                     if (!contains_instant(span, now)) continue;
-                    // Iteration order is event index then interval index, so only a strictly
-                    // better priority replaces the incumbent.
-                    if (out->active && !outranks(ev, *out->event)) continue;
+                    // Within one event the first interval found stays.
+                    if (out->active &&
+                        (out->event == &ev ||
+                         !takes_precedence(precedence_of(ev, e),
+                                           precedence_of(*out->event,
+                                                         static_cast<size_t>(out->event - events))))) {
+                        continue;
+                    }
                     out->active = true;
                     out->event = &ev;
                     out->interval_index = r.index;
@@ -328,6 +356,89 @@ bool price_at(const Event* events, size_t event_count, const DateTime& now,
         }
     }
     return out->active;
+}
+
+Precedence precedence_of(const Event& event, size_t order) {
+    return Precedence{event.has_priority, event.priority, event.has_modification_date_time,
+                      event.modification_date_time, order};
+}
+
+bool takes_precedence(const Precedence& a, const Precedence& b) {
+    if (outranks(a, b)) return true;
+    if (outranks(b, a)) return false;
+    if (a.has_modification_date_time != b.has_modification_date_time) {
+        return a.has_modification_date_time;
+    }
+    if (a.has_modification_date_time) {
+        const int c = compare(a.modification_date_time, b.modification_date_time);
+        if (c != 0) return c > 0;
+    }
+    return a.order > b.order;
+}
+
+bool extend_cover(const Event& event, const char* payload_type, const DateTime& limit,
+                  DateTime* t) {
+    if (event_extent(event).looping) return false;
+    const int type = find_type(event, payload_type);
+    bool moved = false;
+    IntervalResolver resolver(event);
+    ResolvedInterval r;
+    while (resolver.next(&r)) {
+        if (!priced(event, r, type) || !contains_instant(r.period, *t)) continue;
+        const DateTime e = end_of(r.period);
+        *t = compare(e, limit) < 0 ? e : limit;
+        moved = true;
+    }
+    return moved;
+}
+
+namespace detail {
+
+bool superseded_core(const Event& target, size_t target_order, const Event* events, size_t count,
+                     const Precedence* extra, ExtendFn extra_extend, const void* extra_source,
+                     const TimeInterval& window, const char* payload_type) {
+    if (event_extent(target).looping) return false;
+    const int type = find_type(target, payload_type);
+    const Precedence pt = precedence_of(target, target_order);
+    const bool extra_wins = extra != nullptr && takes_precedence(*extra, pt);
+    bool any = false;
+    IntervalResolver resolver(target);
+    ResolvedInterval r;
+    while (resolver.next(&r)) {
+        DateTime t, end;
+        if (!priced(target, r, type) || !clip(r.period, window, &t, &end)) continue;
+        any = true;
+        while (compare(t, end) < 0) {
+            bool moved = false;
+            for (size_t j = 0; j < count; ++j) {
+                if (j == target_order || !takes_precedence(precedence_of(events[j], j), pt)) continue;
+                moved = extend_cover(events[j], payload_type, end, &t) || moved;
+            }
+            if (extra_wins) moved = extra_extend(extra_source, payload_type, end, &t) || moved;
+            if (!moved) return false;
+        }
+    }
+    return any;
+}
+
+}  // namespace detail
+
+namespace {
+
+bool extend_event(const void* source, const char* payload_type, const DateTime& limit,
+                  DateTime* t) {
+    return extend_cover(*static_cast<const Event*>(source), payload_type, limit, t);
+}
+
+}  // namespace
+
+bool superseded(const Event& target, size_t target_order, const Event* events, size_t count,
+                const Event* extra, const TimeInterval& window, const char* payload_type) {
+    Precedence p{};
+    if (extra != nullptr) p = precedence_of(*extra, count);
+    return detail::superseded_core(target, target_order, events, count,
+                                   extra != nullptr ? &p : nullptr, extend_event, extra, window,
+                                   payload_type);
 }
 
 bool price_at(const Event* events, size_t event_count, int64_t now_unix,
