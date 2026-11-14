@@ -126,7 +126,7 @@ static void test_python_event() {
     TEST_ASSERT_TRUE(event.has_priority);
     TEST_ASSERT_EQUAL_UINT32(1, event.priority);
     TEST_ASSERT_TRUE(event.has_duration);
-    TEST_ASSERT_EQUAL_INT32(2, event.duration.hours);
+    TEST_ASSERT_EQUAL_INT32(2, oa3::to_duration(event.duration).hours);
     TEST_ASSERT_TRUE(event.has_interval_period);
     TEST_ASSERT_TRUE(event.interval_period.has_start);
     TEST_ASSERT_EQUAL_UINT8(14, oa3::to_civil(event.interval_period.start).hour);
@@ -138,13 +138,13 @@ static void test_python_event() {
     TEST_ASSERT_EQUAL_INT32(0, iv.id);
     TEST_ASSERT_FALSE(iv.has_interval_period);
     TEST_ASSERT_EQUAL_UINT8(1, iv.payload_count);
-    TEST_ASSERT_EQUAL_STRING("PRICE", iv.payloads[0].type);
+    TEST_ASSERT_EQUAL_STRING("PRICE", oa3::payload_type(event, iv.payloads[0]));
     const oa3::Value* v = oa3::payload_value(event, iv.payloads[0], 0);
     TEST_ASSERT_NOT_NULL(v);
     TEST_ASSERT_TRUE(v->kind == oa3::ValueKind::kNumber);
     TEST_ASSERT_EQUAL_STRING("0.5", v->text);
     TEST_ASSERT_EQUAL_DOUBLE(0.5, v->number);
-    TEST_ASSERT_NOT_NULL(oa3::find_descriptor(event, iv.payloads[0].type));
+    TEST_ASSERT_NOT_NULL(oa3::find_descriptor(event, oa3::payload_type(event, iv.payloads[0])));
 }
 
 static void test_python_event_export_price_case() {
@@ -153,7 +153,7 @@ static void test_python_event_export_price_case() {
                              "units":"KWH","currency":"USD"}],
       "intervals":[{"id":0,"payloads":[{"type":"EXPORT_PRICE","values":[0.10]}]}]})";
     ASSERT_RESULT(ParseResult::kOk, event_from(json));
-    TEST_ASSERT_EQUAL_STRING("EXPORT_PRICE", event.intervals[0].payloads[0].type);
+    TEST_ASSERT_EQUAL_STRING("EXPORT_PRICE", oa3::payload_type(event, event.intervals[0].payloads[0]));
     TEST_ASSERT_EQUAL_STRING("EXPORT_PRICE", event.descriptors[0].payload_type);
     TEST_ASSERT_EQUAL_STRING("0.10", event.values[0].text);
     TEST_ASSERT_EQUAL_STRING("", event.id);
@@ -304,7 +304,7 @@ static void test_price_server_events() {
         TEST_ASSERT_TRUE(e.has_modification_date_time);
         TEST_ASSERT_EQUAL_UINT8(9, e.modification_date_time.frac_digits);
         TEST_ASSERT_TRUE(e.has_interval_period);
-        TEST_ASSERT_EQUAL_INT32(24, e.interval_period.duration.hours);
+        TEST_ASSERT_EQUAL_INT32(24, oa3::to_duration(e.interval_period.duration).hours);
         TEST_ASSERT_FALSE(e.has_priority);
         for (uint16_t k = 0; k < e.interval_count; ++k) {
             TEST_ASSERT_EQUAL_INT32(k, e.intervals[k].id);
@@ -318,7 +318,7 @@ static void test_price_server_events() {
     TEST_ASSERT_EQUAL_UINT32(621411877, first.modification_date_time.nanos);
     TEST_ASSERT_EQUAL_UINT8(8, oa3::to_civil(first.interval_period.start).hour);
     TEST_ASSERT_EQUAL_UINT8(14, oa3::to_civil(first.interval_period.start).day);
-    const oa3::Payload* p = oa3::find_payload(first.intervals[0], "PRICE");
+    const oa3::Payload* p = oa3::find_payload(first, first.intervals[0], "PRICE");
     TEST_ASSERT_NOT_NULL(p);
     const oa3::Value* v = oa3::payload_value(first, *p, 0);
     TEST_ASSERT_EQUAL_STRING("0.050294", v->text);
@@ -432,10 +432,10 @@ static void test_values_whitespace_and_escapes() {
                        "{\"values\": [ 7 ], \"type\": \"B\"} ], \"id\": 4 } ]\n}";
     ASSERT_RESULT(ParseResult::kOk, event_from(json));
     TEST_ASSERT_EQUAL_INT32(3, event.intervals[0].id);
-    TEST_ASSERT_EQUAL_STRING("A\"", event.intervals[0].payloads[0].type);
+    TEST_ASSERT_EQUAL_STRING("A\"", oa3::payload_type(event, event.intervals[0].payloads[0]));
     TEST_ASSERT_EQUAL_STRING("0.25", event.values[0].text);
     TEST_ASSERT_EQUAL_STRING("1", event.values[1].text);
-    TEST_ASSERT_EQUAL_STRING("B", event.intervals[1].payloads[0].type);
+    TEST_ASSERT_EQUAL_STRING("B", oa3::payload_type(event, event.intervals[1].payloads[0]));
     TEST_ASSERT_EQUAL_UINT16(2, event.intervals[1].payloads[0].first_value);
     TEST_ASSERT_EQUAL_STRING("7", event.values[2].text);
 }
@@ -478,6 +478,54 @@ static void test_interval_capacity() {
     ASSERT_RESULT(ParseResult::kCapacityExceeded, event_from(scratch));
 }
 
+// One interval per type, T0 .. T<n-1>, then one more of T0.
+static void build_types(int n) {
+    size_t len = static_cast<size_t>(snprintf(scratch, sizeof(scratch), R"({"programID":"p","intervals":[)"));
+    for (int i = 0; i <= n; ++i) {
+        len += static_cast<size_t>(snprintf(scratch + len, sizeof(scratch) - len,
+                                            R"(%s{"id":%d,"payloads":[{"type":"T%d","values":[%d]}]})",
+                                            i ? "," : "", i, i < n ? i : 0, i));
+    }
+    snprintf(scratch + len, sizeof(scratch) - len, "]}");
+}
+
+static void test_payload_types_interned() {
+    build_intervals(25);
+    ASSERT_RESULT(ParseResult::kOk, event_from(scratch));
+    TEST_ASSERT_EQUAL_UINT8(1, event.type_count);
+    TEST_ASSERT_EQUAL_STRING("PRICE", event.types[0]);
+    for (uint16_t i = 0; i < event.interval_count; ++i) {
+        TEST_ASSERT_EQUAL_UINT8(0, event.intervals[i].payloads[0].type_index);
+    }
+
+    build_types(OA3_MAX_EVENT_TYPES);
+    ASSERT_RESULT(ParseResult::kOk, event_from(scratch));
+    TEST_ASSERT_EQUAL_UINT8(OA3_MAX_EVENT_TYPES, event.type_count);
+    char want[8];
+    for (int i = 0; i < OA3_MAX_EVENT_TYPES; ++i) {
+        snprintf(want, sizeof(want), "T%d", i);
+        TEST_ASSERT_EQUAL_STRING(want, oa3::payload_type(event, event.intervals[i].payloads[0]));
+        TEST_ASSERT_EQUAL_PTR(&event.intervals[i].payloads[0],
+                              oa3::find_payload(event, event.intervals[i], want));
+    }
+    TEST_ASSERT_EQUAL_UINT8(0, event.intervals[OA3_MAX_EVENT_TYPES].payloads[0].type_index);
+    TEST_ASSERT_EQUAL_INT(-1, oa3::find_type(event, "PRICE"));
+
+    build_types(OA3_MAX_EVENT_TYPES + 1);
+    ASSERT_RESULT(ParseResult::kCapacityExceeded, event_from(scratch));
+
+    // A type the filter drops takes no entry.
+    const char* types[] = {"T2"};
+    oa3::ParseOptions opt = {types, 1, nullptr};
+    ASSERT_RESULT(ParseResult::kOk, event_from(scratch, &opt));
+    TEST_ASSERT_EQUAL_UINT8(1, event.type_count);
+    TEST_ASSERT_EQUAL_STRING("T2", event.types[0]);
+
+    oa3::Payload bad{};
+    bad.type_index = 1;
+    TEST_ASSERT_EQUAL_STRING("", oa3::payload_type(event, bad));
+}
+
 static void test_intervals_fields() {
     ASSERT_RESULT(ParseResult::kOk, event_from(R"({"programID":"p","intervals":[
       {"id":0,"intervalPeriod":{}},
@@ -486,13 +534,25 @@ static void test_intervals_fields() {
       {"id":-7}]})"));
     TEST_ASSERT_EQUAL_UINT16(4, event.interval_count);
     TEST_ASSERT_TRUE(event.intervals[0].has_interval_period);
-    TEST_ASSERT_FALSE(event.intervals[0].interval_period.has_start);
-    TEST_ASSERT_FALSE(event.intervals[0].interval_period.has_duration);
-    TEST_ASSERT_FALSE(event.intervals[0].interval_period.has_randomize_start);
-    TEST_ASSERT_TRUE(event.intervals[1].interval_period.has_start);
-    TEST_ASSERT_EQUAL_INT32(15, event.intervals[1].interval_period.duration.minutes);
-    TEST_ASSERT_EQUAL_INT32(5, event.intervals[1].interval_period.randomize_start.minutes);
-    TEST_ASSERT_TRUE(event.intervals[2].interval_period.has_randomize_start);
+    TEST_ASSERT_FALSE(event.intervals[0].has_start);
+    TEST_ASSERT_FALSE(event.intervals[0].has_duration);
+    TEST_ASSERT_TRUE(event.intervals[1].has_start);
+    TEST_ASSERT_EQUAL_INT32(15 * 60, event.intervals[1].duration.seconds);
+#ifdef OA3_INTERVAL_RANDOMIZE_START
+    TEST_ASSERT_FALSE(event.intervals[0].has_randomize_start);
+    TEST_ASSERT_EQUAL_INT32(5 * 60, event.intervals[1].randomize_start.seconds);
+    TEST_ASSERT_TRUE(event.intervals[2].has_randomize_start);
+#endif
+    oa3::ResolvedInterval r[4];
+    TEST_ASSERT_EQUAL_size_t(4, oa3::resolve_intervals(event, r, 4));
+#ifdef OA3_INTERVAL_RANDOMIZE_START
+    TEST_ASSERT_TRUE(r[1].has_randomize_start);
+    TEST_ASSERT_EQUAL_INT32(5, r[1].randomize_start.minutes);
+#else
+    TEST_ASSERT_FALSE(r[1].has_randomize_start);
+    TEST_ASSERT_FALSE(r[2].has_randomize_start);
+#endif
+    TEST_ASSERT_TRUE(event.intervals[2].has_interval_period);
     TEST_ASSERT_EQUAL_UINT8(0, event.intervals[2].payload_count);
     TEST_ASSERT_EQUAL_INT32(-7, event.intervals[3].id);
     TEST_ASSERT_FALSE(event.intervals[3].has_interval_period);
@@ -551,7 +611,7 @@ static void test_event_snake_case() {
     TEST_ASSERT_EQUAL_UINT8(1, event.descriptor_count);
     TEST_ASSERT_EQUAL_STRING("PRICE", event.descriptors[0].payload_type);
     TEST_ASSERT_EQUAL_STRING("", event.descriptors[0].currency);
-    TEST_ASSERT_EQUAL_INT32(30, event.intervals[0].interval_period.duration.minutes);
+    TEST_ASSERT_EQUAL_INT32(30 * 60, event.intervals[0].duration.seconds);
     TEST_ASSERT_EQUAL_STRING("0.2", event.values[0].text);
 }
 
@@ -599,7 +659,7 @@ static void test_payload_filter() {
     TEST_ASSERT_EQUAL_STRING("0.04", event.values[0].text);
     TEST_ASSERT_EQUAL_STRING("0.05", event.values[1].text);
     TEST_ASSERT_EQUAL_UINT16(1, event.intervals[1].payloads[0].first_value);
-    TEST_ASSERT_NULL(oa3::find_payload(event.intervals[0], "PRICE"));
+    TEST_ASSERT_NULL(oa3::find_payload(event, event.intervals[0], "PRICE"));
 
     ASSERT_RESULT(ParseResult::kCapacityExceeded, event_from(json));
 }
@@ -658,11 +718,13 @@ static void test_entities_helpers() {
     oa3::Event e{};
     e.value_count = 2;
     e.intervals[0].payload_count = 1;
-    strcpy(e.intervals[0].payloads[0].type, "PRICE");
+    e.type_count = 1;
+    strcpy(e.types[0], "PRICE");
+    e.intervals[0].payloads[0].type_index = 0;
     e.intervals[0].payloads[0].first_value = 1;
     e.intervals[0].payloads[0].value_count = 2;
-    TEST_ASSERT_NULL(oa3::find_payload(e.intervals[0], "GHG"));
-    const oa3::Payload* p = oa3::find_payload(e.intervals[0], "PRICE");
+    TEST_ASSERT_NULL(oa3::find_payload(e, e.intervals[0], "GHG"));
+    const oa3::Payload* p = oa3::find_payload(e, e.intervals[0], "PRICE");
     TEST_ASSERT_NOT_NULL(p);
     TEST_ASSERT_EQUAL_PTR(&e.values[1], oa3::payload_value(e, *p, 0));
     TEST_ASSERT_NULL(oa3::payload_value(e, *p, 1));
@@ -972,7 +1034,7 @@ static void test_window_drops_intervals_beyond_capacity() {
         TEST_ASSERT_EQUAL_UINT16(24, event.value_count);
         TEST_ASSERT_EQUAL_INT32(30, event.intervals[0].id);
         TEST_ASSERT_EQUAL_STRING("30", event.values[0].text);
-        TEST_ASSERT_TRUE(event.intervals[0].interval_period.has_start);
+        TEST_ASSERT_TRUE(event.intervals[0].has_start);
 
         oa3::ResolvedInterval r[OA3_MAX_INTERVALS];
         TEST_ASSERT_EQUAL_size_t(24, oa3::resolve_intervals(event, r, OA3_MAX_INTERVALS));
@@ -1067,7 +1129,10 @@ static void test_nested_snake_case_and_unknown_keys() {
     TEST_ASSERT_TRUE(notification.has_object);
     TEST_ASSERT_TRUE(notification.event.has_interval_period);
     TEST_ASSERT_EQUAL_UINT8(1, notification.event.descriptor_count);
-    TEST_ASSERT_TRUE(notification.event.intervals[0].interval_period.has_randomize_start);
+#ifdef OA3_INTERVAL_RANDOMIZE_START
+    TEST_ASSERT_TRUE(notification.event.intervals[0].has_randomize_start);
+#endif
+    TEST_ASSERT_TRUE(notification.event.intervals[0].has_interval_period);
 
     ASSERT_RESULT(ParseResult::kOk, event_from(R"({"programID":"p",
       "zzz":{"intervals":[{"payloads":[{"values":[1]}]}]},
@@ -1104,6 +1169,7 @@ int main() {
     RUN_TEST(test_values_whitespace_and_escapes);
     RUN_TEST(test_value_capacity);
     RUN_TEST(test_interval_capacity);
+    RUN_TEST(test_payload_types_interned);
     RUN_TEST(test_intervals_fields);
     RUN_TEST(test_event_fields);
     RUN_TEST(test_event_snake_case);

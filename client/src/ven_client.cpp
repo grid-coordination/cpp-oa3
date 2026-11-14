@@ -193,6 +193,7 @@ VenClient::VenClient(HttpTransport& http, Clock& clock, const VenStorage& storag
       _scratch(storage.scratch),
       _event_count(0),
       _scratch_count(0),
+      _events_dirty(false),
       _due_now(false),
       _stale(false),
       _has_last_loop(false),
@@ -265,7 +266,7 @@ bool VenClient::start(const VenConfig& config) {
     if (is_negative(config.horizon) || is_zero(config.horizon)) {
         return false;
     }
-    if (_storage.events == nullptr || _storage.scratch == nullptr || _storage.arena == nullptr ||
+    if (_storage.events == nullptr || _storage.arena == nullptr ||
         _storage.capacity == 0) {
         return false;
     }
@@ -378,6 +379,7 @@ bool VenClient::start(const VenConfig& config) {
     _scratch = _storage.scratch;
     _event_count = 0;
     _scratch_count = 0;
+    _events_dirty = false;
     _due_now = true;
     _stale = false;
     _has_last_loop = false;
@@ -404,6 +406,11 @@ bool VenClient::start(const VenConfig& config) {
 
 void VenClient::stop() {
     mqtt_reset();
+    if (_scratch == nullptr && _event_skip != 0) {
+        _event_count = 0;
+        _has_fetch = false;
+    }
+    _event_skip = 0;
     _phase = Phase::kStopped;
     _status.status = VenStatus::kStopped;
     _status.notify = NotifyState::kOff;
@@ -532,12 +539,22 @@ void VenClient::on_events_response(void* ctx, int status, ByteReader& body) {
     VenClient* self = static_cast<VenClient*>(ctx);
     self->_response_seen = true;
     self->_response_status = status;
-    if (is_2xx(status)) {
-        self->_response_parsed = true;
-        self->_response_parse =
-            append_events(body, *self->_storage.arena, self->_scratch, self->_storage.capacity,
-                          &self->_scratch_count, &self->_response_scanned, &self->_options);
+    if (!is_2xx(status)) {
+        return;
     }
+    self->_response_parsed = true;
+    Event* out = self->_scratch;
+    size_t* count = &self->_scratch_count;
+    if (out == nullptr) {
+        out = self->_events;
+        count = &self->_event_count;
+        if (self->_event_pages == 0) {
+            self->_event_count = 0;
+        }
+        self->_events_dirty = true;
+    }
+    self->_response_parse = append_events(body, *self->_storage.arena, out, self->_storage.capacity,
+                                          count, &self->_response_scanned, &self->_options);
 }
 
 uint32_t VenClient::backoff_ms(uint16_t failures) const {
@@ -564,6 +581,20 @@ bool VenClient::fail(VenStatus kind, uint32_t now_ms) {
                static_cast<unsigned>(_status.consecutive_failures),
                static_cast<unsigned long>(delay_s));
     return true;
+}
+
+// With a single buffer, the events a failed fetch has begun to overwrite are cleared.
+bool VenClient::fetch_failed(VenStatus kind, const DateTime& now, uint32_t now_ms) {
+    if (_events_dirty) {
+        _events_dirty = false;
+        _event_count = 0;
+        _data_changed = true;
+        update_price(now);
+        _has_fetch = false;
+        _stale = false;
+        log_printf(_config.log, LogLevel::kWarn, "events cleared: the fetch failed while parsing");
+    }
+    return fail(kind, now_ms);
 }
 
 void VenClient::not_found(uint32_t now_ms) {
@@ -694,19 +725,19 @@ bool VenClient::poll(const DateTime& now, uint32_t now_ms) {
                           OA3_EVENTS_PAGE_LIMIT)) {
         _event_skip = 0;
         _status.http_result = HttpResult::kInvalidUrl;
-        return fail(VenStatus::kTransportError, now_ms);
+        return fetch_failed(VenStatus::kTransportError, now, now_ms);
     }
     const HttpResult r = request(on_events_response);
     const uint32_t skip = _event_skip;
     _event_skip = 0;
     if (r != HttpResult::kOk) {
-        return fail(VenStatus::kTransportError, now_ms);
+        return fetch_failed(VenStatus::kTransportError, now, now_ms);
     }
     if (!is_2xx(_response_status)) {
-        return fail(VenStatus::kHttpError, now_ms);
+        return fetch_failed(VenStatus::kHttpError, now, now_ms);
     }
     if (_response_parse != ParseResult::kOk && _response_parse != ParseResult::kTruncated) {
-        return fail(VenStatus::kParseError, now_ms);
+        return fetch_failed(VenStatus::kParseError, now, now_ms);
     }
     _event_truncated = _event_truncated || _response_parse == ParseResult::kTruncated;
     ++_event_pages;
@@ -720,11 +751,14 @@ bool VenClient::poll(const DateTime& now, uint32_t now_ms) {
         _event_truncated = true;
     }
 
-    Event* swap = _events;
-    _events = _scratch;
-    _scratch = swap;
-    _event_count = _scratch_count;
-    _scratch_count = 0;
+    if (_scratch != nullptr) {
+        Event* swap = _events;
+        _events = _scratch;
+        _scratch = swap;
+        _event_count = _scratch_count;
+        _scratch_count = 0;
+    }
+    _events_dirty = false;
 
     _data_changed = true;
     _has_fetch = true;
@@ -900,7 +934,8 @@ void VenClient::loop() {
     }
 
     report(now_ms, failed);
-    if (_phase == Phase::kStopped || !_has_fetch) {
+    // A single buffer between /events pages holds a partial set.
+    if (_phase == Phase::kStopped || !_has_fetch || _events_dirty) {
         return;
     }
     update_price(now);

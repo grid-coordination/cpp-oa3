@@ -4,6 +4,18 @@ All notable changes to `cpp-oa3` are recorded here. Format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Changed
+
+- A smaller `Event`, 3,056 bytes with the default capacities instead of 5,400 (an `Interval` is 48 bytes instead of 144), with breaking changes to the entity structs:
+  - Each event stores its payload type strings once, in `types` (`OA3_MAX_EVENT_TYPES`, default 4); `Payload::type` is replaced by `type_index`, read through `payload_type(event, payload)`. `find_payload()` takes the event, and `find_type()` is new. More distinct types than fit is `kCapacityExceeded`.
+  - Entities hold durations as `CompactDuration` (20 bytes against `Duration`'s 36): calendar months, calendar days and elapsed seconds and nanoseconds, the parts `add()` applies, so every addition gives the same instant. `to_compact()` and `to_duration()` convert; `to_duration()` gives normalized fields (P14M as P1Y2M, P2W as P14D, PT90M as PT1H30M). An entity duration whose total months, days or seconds (hours, minutes and seconds together; 2^31 seconds is about 68 years) leave int32 is now `kInvalidField`. `Duration` itself and `parse_duration()`, `format_duration()` and `add()` are unchanged.
+  - `Interval` holds its period in its own fields (`start`, `duration`, `has_start`, `has_duration`, and `has_interval_period` when the member was present) instead of an `IntervalPeriod`. `IntervalResolver::resolve()` takes the `Interval`.
+  - An interval's own `randomizeStart` is kept only when the build defines `OA3_INTERVAL_RANDOMIZE_START`; otherwise it is ignored and the event's applies to every interval.
+
+### Added
+
+- A single event buffer: `VenStorage::scratch` may be nullptr, and `StaticVenStorage<N, ArenaSize, false>` gives that form. A fetch then parses into the live events, and one that fails after its response began to parse clears them and reports `has_data` false until a later fetch succeeds. With `OA3_MAX_EVENTS=2` and an 8 KB arena the storage is 14,344 bytes on the ESP32.
+
 ## [0.2.0] - 2026-11-14
 
 MQTT notifications, run overnight on the ESP32 by esp32-firmware: 16-18 hours each on an ESP32-POE-ISO-WROVER (with `exclusive_tls`), an ESP32-S3 and an ESP32-P4, with no failures and no heap drift.

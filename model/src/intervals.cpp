@@ -49,35 +49,35 @@ bool IntervalResolver::next(ResolvedInterval* out) {
     if (_event == nullptr) return false;
     const Event& ev = *_event;
     if (_next >= ev.interval_count || _next >= OA3_MAX_INTERVALS) return false;
-    const Interval& iv = ev.intervals[_next];
-    resolve(iv.has_interval_period ? &iv.interval_period : nullptr, iv.id, out);
+    resolve(ev.intervals[_next], out);
     return true;
 }
 
-void IntervalResolver::resolve(const IntervalPeriod* ip, int32_t id, ResolvedInterval* out) {
+void IntervalResolver::resolve(const Interval& iv, ResolvedInterval* out) {
     const IntervalPeriod* eip = _event_period;
+    const bool own = iv.has_interval_period;
 
     ResolvedInterval r{};
     r.index = _next;
-    r.id = id;
+    r.id = iv.id;
 
-    if (ip && ip->has_duration) {
+    if (own && iv.has_duration) {
         r.has_duration = true;
-        r.duration = ip->duration;
+        r.duration = to_duration(iv.duration);
     } else if (eip && eip->has_duration) {
         r.has_duration = true;
-        r.duration = eip->duration;
+        r.duration = to_duration(eip->duration);
     }
 
-    const bool sentinel = ip && ip->has_start && is_sequential_sentinel(ip->start);
+    const bool sentinel = own && iv.has_start && is_sequential_sentinel(iv.start);
     if (sentinel && _next == 0 && eip && eip->has_start) {
         r.has_start = true;
         r.start = eip->start;
     } else if (sentinel && _next > 0) {
         if (_has_prev) r.has_start = add(_prev_start, _prev_duration, &r.start);
-    } else if (ip && ip->has_start) {
+    } else if (own && iv.has_start) {
         r.has_start = true;
-        r.start = ip->start;
+        r.start = iv.start;
     } else if (eip && eip->has_start) {
         if (_has_accumulated) {
             r.has_start = add(eip->start, _accumulated, &r.start);
@@ -87,12 +87,15 @@ void IntervalResolver::resolve(const IntervalPeriod* ip, int32_t id, ResolvedInt
         }
     }
 
-    if (ip && ip->has_randomize_start) {
+#ifdef OA3_INTERVAL_RANDOMIZE_START
+    if (own && iv.has_randomize_start) {
         r.has_randomize_start = true;
-        r.randomize_start = ip->randomize_start;
-    } else if (eip && eip->has_randomize_start) {
+        r.randomize_start = to_duration(iv.randomize_start);
+    }
+#endif
+    if (!r.has_randomize_start && eip && eip->has_randomize_start) {
         r.has_randomize_start = true;
-        r.randomize_start = eip->randomize_start;
+        r.randomize_start = to_duration(eip->randomize_start);
     }
 
     r.has_period = r.has_start && r.has_duration && make_interval(r.start, r.duration, &r.period);
@@ -163,7 +166,7 @@ void ExtentBuilder::add(const ResolvedInterval& r) {
     }
 }
 
-EventExtent ExtentBuilder::finish(bool has_duration, const Duration& duration) const {
+EventExtent ExtentBuilder::finish(bool has_duration, const CompactDuration& duration) const {
     EventExtent x{};
     x.has_period = _any;
     x.hull = _hull;
@@ -174,7 +177,7 @@ EventExtent ExtentBuilder::finish(bool has_duration, const Duration& duration) c
         return x;
     }
     TimeInterval bound;
-    if (!make_interval(_first_start, duration, &bound)) return x;
+    if (!make_interval(_first_start, to_duration(duration), &bound)) return x;
     x.looping = true;
     x.span.end = bound.end;
     x.span.end_indefinite = bound.end_indefinite;
@@ -219,10 +222,10 @@ bool is_empty(const TimeInterval& iv) {
     return !iv.end_indefinite && compare(iv.start, iv.end) >= 0;
 }
 
-const Payload* payload_of(const Interval& iv, const char* type) {
+const Payload* payload_of(const Interval& iv, int type) {
     uint8_t n = iv.payload_count <= OA3_MAX_PAYLOADS ? iv.payload_count : OA3_MAX_PAYLOADS;
     for (uint8_t i = 0; i < n; ++i) {
-        if (strcmp(iv.payloads[i].type, type) == 0) return &iv.payloads[i];
+        if (iv.payloads[i].type_index == type) return &iv.payloads[i];
     }
     return nullptr;
 }
@@ -251,6 +254,8 @@ bool price_at(const Event* events, size_t event_count, const DateTime& now,
 
     for (size_t e = 0; e < event_count; ++e) {
         const Event& ev = events[e];
+        const int type = find_type(ev, payload_type);
+        if (type < 0) continue;
         const EventExtent extent = event_extent(ev);
 
         int64_t cycle = 0;
@@ -267,7 +272,7 @@ bool price_at(const Event* events, size_t event_count, const DateTime& now,
         ResolvedInterval r;
         while (resolver.next(&r)) {
             if (!r.has_period || is_empty(r.period)) continue;
-            const Payload* p = payload_of(ev.intervals[r.index], payload_type);
+            const Payload* p = payload_of(ev.intervals[r.index], type);
             if (!p || p->value_count == 0 || p->first_value >= ev.value_count) continue;
             uint16_t n = p->value_count;
             if (n > ev.value_count - p->first_value) {

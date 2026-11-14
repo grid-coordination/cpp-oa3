@@ -41,12 +41,23 @@ static void assert_utc(const char* wire, const char* expected) {
     TEST_ASSERT_EQUAL_STRING_MESSAGE(expected, buf, wire);
 }
 
+static Duration through_compact(const Duration& d) {
+    oa3::CompactDuration c{};
+    TEST_ASSERT_TRUE(oa3::to_compact(d, &c));
+    return oa3::to_duration(c);
+}
+
+// Also through a CompactDuration, which must give the same instant.
 static void assert_add(const char* start, const char* dur, const char* expected) {
     char buf[oa3::kDateTimeStringSize];
     DateTime out{};
     TEST_ASSERT_TRUE_MESSAGE(oa3::add(dt_of(start), dur_of(dur), &out), dur);
     TEST_ASSERT_TRUE(oa3::format_datetime(out, buf, sizeof(buf)) > 0);
     TEST_ASSERT_EQUAL_STRING_MESSAGE(expected, buf, dur);
+    DateTime compact_out{};
+    TEST_ASSERT_TRUE_MESSAGE(oa3::add(dt_of(start), through_compact(dur_of(dur)), &compact_out), dur);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, oa3::compare(out, compact_out), dur);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(out.frac_digits, compact_out.frac_digits, dur);
 }
 
 // python-oa3 tests/test_time.py:16-62 (parse_datetime)
@@ -453,6 +464,75 @@ static void test_duration_sum() {
     TEST_ASSERT_TRUE(oa3::is_zero(out));
 }
 
+// Every duration vector above: the compact form survives to_duration() and back, and adds as
+// the original does at instants that exercise month ends, leap days and fractions.
+static void test_compact_duration_roundtrip() {
+    static const char* const kVectors[] = {
+        "PT1H", "P1DT2H30M", "P1Y2M3DT4H5M6.789S", "P2W", "PT36H", "P9999Y", "PT0.1234567891S",
+        "P2147483647D", "-P1DT2H0.5S", "-P9999Y", "PT1H30M", "PT2H30M", "PT15M", "PT0S",
+        "-P1DT2H", "-PT0.5S", "PT1.500S", "PT0.000000001S", "P0D", "P1Y0M", "P1DT0H", "PT0.1S",
+        "P10000Y", "P9998Y", "PT0.75S", "PT0.25S", "-PT0.25S", "P1M", "PT1S", "P1Y", "P4Y",
+        "P1M1D", "P1MT24H", "P1Y1M", "PT25H", "-PT1H", "-P1M", "-P1D", "P40000Y", "-P40000Y",
+    };
+    static const char* const kStarts[] = {
+        "2024-01-31T20:00:00Z", "2024-02-29T00:00:00Z", "2023-12-31T23:59:59.250Z",
+        "2026-11-01T07:00:00Z", "2024-06-15T10:00:00.750Z",
+    };
+    char want[oa3::kDurationStringSize];
+    char got[oa3::kDurationStringSize];
+    for (const char* v : kVectors) {
+        const Duration d = dur_of(v);
+        oa3::CompactDuration c{};
+        TEST_ASSERT_TRUE_MESSAGE(oa3::to_compact(d, &c), v);
+        const Duration back = oa3::to_duration(c);
+        oa3::CompactDuration again{};
+        TEST_ASSERT_TRUE_MESSAGE(oa3::to_compact(back, &again), v);
+        TEST_ASSERT_EQUAL_MEMORY_MESSAGE(&c, &again, sizeof(c), v);
+        TEST_ASSERT_EQUAL_MESSAGE(oa3::is_zero(d), oa3::is_zero(back), v);
+        TEST_ASSERT_EQUAL_MESSAGE(oa3::is_negative(d), oa3::is_negative(back), v);
+        TEST_ASSERT_EQUAL_MESSAGE(oa3::is_indefinite(d), oa3::is_indefinite(back), v);
+        TEST_ASSERT_TRUE_MESSAGE(oa3::format_duration(back, got, sizeof(got)) > 0, v);
+        Duration reparsed{};
+        TEST_ASSERT_TRUE_MESSAGE(oa3::parse_duration(got, &reparsed), got);
+        oa3::format_duration(reparsed, want, sizeof(want));
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(got, want, v);
+        for (const char* start : kStarts) {
+            DateTime a{};
+            DateTime b{};
+            const bool ok_a = oa3::add(dt_of(start), d, &a);
+            const bool ok_b = oa3::add(dt_of(start), back, &b);
+            TEST_ASSERT_EQUAL_MESSAGE(ok_a, ok_b, v);
+            if (ok_a) {
+                TEST_ASSERT_EQUAL_INT_MESSAGE(0, oa3::compare(a, b), v);
+            }
+        }
+    }
+}
+
+static void assert_compact_form(const char* in, const char* out) {
+    char buf[oa3::kDurationStringSize];
+    TEST_ASSERT_TRUE_MESSAGE(oa3::format_duration(through_compact(dur_of(in)), buf, sizeof(buf)) > 0, in);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(out, buf, in);
+}
+
+static void test_compact_duration_forms() {
+    assert_compact_form("P14M", "P1Y2M");
+    assert_compact_form("P2W", "P14D");
+    assert_compact_form("PT90M", "PT1H30M");
+    assert_compact_form("PT36H", "PT36H");
+    assert_compact_form("PT1.500S", "PT1.500S");
+    assert_compact_form("-P1Y14M", "-P2Y2M");
+    assert_compact_form("-PT3661.5S", "-PT1H1M1.5S");
+
+    oa3::CompactDuration c{};
+    TEST_ASSERT_TRUE(oa3::to_compact(dur_of("PT596523H"), &c));
+    TEST_ASSERT_FALSE(oa3::to_compact(dur_of("PT596524H"), &c));
+    TEST_ASSERT_FALSE(oa3::to_compact(dur_of("P178956971Y"), &c));
+    TEST_ASSERT_FALSE(oa3::to_compact(dur_of("P306783379W"), &c));
+    TEST_ASSERT_FALSE(oa3::to_compact(dur_of("PT2147483647H"), &c));
+    TEST_ASSERT_FALSE(oa3::to_compact(dur_of("P1D"), nullptr));
+}
+
 // pendulum results measured through python-oa3 _advance_datetime (P1M add exit criteria)
 static void test_add_calendar_pendulum() {
     assert_add("2024-01-31T20:00:00-08:00", "P1M", "2024-03-01T04:00:00Z");
@@ -537,6 +617,8 @@ int main() {
     RUN_TEST(test_format_duration_errors);
     RUN_TEST(test_duration_predicates);
     RUN_TEST(test_duration_sum);
+    RUN_TEST(test_compact_duration_roundtrip);
+    RUN_TEST(test_compact_duration_forms);
     RUN_TEST(test_add_calendar_pendulum);
     RUN_TEST(test_add_elapsed);
     RUN_TEST(test_add_negative);

@@ -577,6 +577,43 @@ bool duration_sum(const Duration& a, const Duration& b, Duration* out) {
     return true;
 }
 
+bool to_compact(const Duration& d, CompactDuration* out) {
+    if (out == nullptr) {
+        return false;
+    }
+    const int64_t parts[3] = {
+        static_cast<int64_t>(d.years) * 12 + d.months,
+        static_cast<int64_t>(d.weeks) * 7 + d.days,
+        static_cast<int64_t>(d.hours) * 3600 + static_cast<int64_t>(d.minutes) * 60 + d.seconds,
+    };
+    for (int64_t v : parts) {
+        if (v > INT32_MAX || v < INT32_MIN) {
+            return false;
+        }
+    }
+    CompactDuration c{};
+    c.months = static_cast<int32_t>(parts[0]);
+    c.days = static_cast<int32_t>(parts[1]);
+    c.seconds = static_cast<int32_t>(parts[2]);
+    c.nanos = d.nanos;
+    c.frac_digits = d.frac_digits;
+    *out = c;
+    return true;
+}
+
+Duration to_duration(const CompactDuration& c) {
+    Duration d{};
+    d.years = c.months / 12;
+    d.months = c.months % 12;
+    d.days = c.days;
+    d.hours = c.seconds / 3600;
+    d.minutes = c.seconds % 3600 / 60;
+    d.seconds = c.seconds % 60;
+    d.nanos = c.nanos;
+    d.frac_digits = c.frac_digits;
+    return d;
+}
+
 bool add(const DateTime& dt, const Duration& d, DateTime* out) {
     if (out == nullptr || !in_range(dt.seconds)) {
         return false;

@@ -148,9 +148,13 @@ On arduino-esp32 3.x, the port picks the client by scheme: a `NetworkClient` ins
 
 ## Storage
 
-`VenStorage` is the client's working memory: two `Event` arrays (`events` and `scratch`, `capacity` elements each; a fetch fills `scratch` and swaps on success, so a failure keeps the last good events) and the `JsonArena` the parser uses for one top-level object at a time. An `Event` is about 5.4 KB with the default capacities, so `OA3_MAX_EVENTS=2` costs about 21.6 KB in arrays plus the arena (16 KB by default on a 32-bit target). `StaticVenStorage<>` puts all of it in `.bss`; on the `ci/esp32` build with `OA3_MAX_EVENTS=2` it is 37,984 bytes.
+`VenStorage` is the client's working memory: two `Event` arrays (`events` and `scratch`, `capacity` elements each; a fetch fills `scratch` and swaps on success, so a failure keeps the last good events) and the `JsonArena` the parser uses for one top-level object at a time. An `Event` is 3,056 bytes with the default capacities, so `OA3_MAX_EVENTS=2` costs 12,224 bytes in arrays plus the arena (16 KB by default on a 32-bit target). `StaticVenStorage<>` puts all of it in `.bss`; on the `ci/esp32` build with `OA3_MAX_EVENTS=2` it is 28,640 bytes.
 
-MQTT notifications also need a `NotificationStorage` in `VenStorage::notifications`: the `Notification` a message is parsed into (an `Event` and a `Program`), the `/notifiers` and topics responses and the topic lists, 10,088 bytes on the `ci/esp32` build. A client with notifications off needs none of it.
+An `Event` stores each payload type string once (`OA3_MAX_EVENT_TYPES`, 4 by default; `payload_type()` reads it) and its durations as `CompactDuration`. An interval's own `randomizeStart` is kept only when the build defines `OA3_INTERVAL_RANDOMIZE_START`, which makes an `Interval` 72 bytes instead of 48 and an `Event` 3,656 bytes; without it the event's `randomizeStart` applies to every interval and an interval's is ignored. Define it for the whole build, library included, since it changes the struct.
+
+With `VenStorage::scratch` nullptr the client keeps one array: a fetch parses into `events` directly. A fetch that fails once its response has begun to parse, on its first page or a later one, clears the events, logs a warning, reports `has_data` false and no price in force, and retries as usual; a request that fails before any parsing leaves the events as they were. `StaticVenStorage<N, ArenaSize, false>` is the single-buffer form. For a WROOM without PSRAM, with `OA3_MAX_EVENTS=2` and an 8 KB arena, `StaticVenStorage<2, 8192, false>` is 14,344 bytes, against 20,448 with two arrays, and 29,824 with two arrays of the former 5,400-byte events.
+
+MQTT notifications also need a `NotificationStorage` in `VenStorage::notifications`: the `Notification` a message is parsed into (an `Event` and a `Program`), the `/notifiers` and topics responses and the topic lists, 7,744 bytes on the `ci/esp32` build. A client with notifications off needs none of it.
 
 On a board with PSRAM, allocate it there once at init and never free it:
 
@@ -170,7 +174,7 @@ auto* notes = new (notes_mem) oa3::NotificationStorage();
 const oa3::VenStorage storage{events, events + n, n, &arena, notes};
 ```
 
-Without notifications, leave the last member out. Without PSRAM, allocate the same pieces once at startup from the internal heap (`heap_caps_aligned_alloc(..., MALLOC_CAP_INTERNAL)`), not as `StaticVenStorage<>`: on the classic ESP32 about 38 KB of `.bss` shrinks the heap ESP-IDF starts with so far that boot aborts ("esp_timer: Not enough memory to create timer task") before the image is marked valid, and an OTA update rolls back. After a fetch, `arena.high_water()` shows how much of the arena one event needed; shrink `OA3_JSON_ARENA_SIZE` toward it, with margin, if RAM is short. For one price-server event it peaks at 6,984 bytes, so an 8 KB arena serves 24 h; on an ESP32-POE-ISO without PSRAM that raised the lowest internal heap during a fetch from 1.2 KB to 11.1 KB. `OA3_MAX_VALUES` is the number of values one event holds across all its intervals, so it must be at least the interval count (25 for a day of hourly prices); below that, parsing fails with `kCapacityExceeded`. MQTT notifications need about 19 KB more internal RAM (the MQTT client's buffers and `NotificationStorage`), which a classic ESP32 without PSRAM does not have.
+Without notifications, leave the last member out. Without PSRAM, allocate the same pieces once at startup from the internal heap (`heap_caps_aligned_alloc(..., MALLOC_CAP_INTERNAL)`), not as `StaticVenStorage<>`: on the classic ESP32 about 38 KB of `.bss` shrinks the heap ESP-IDF starts with so far that boot aborts ("esp_timer: Not enough memory to create timer task") before the image is marked valid, and an OTA update rolls back. After a fetch, `arena.high_water()` shows how much of the arena one event needed; shrink `OA3_JSON_ARENA_SIZE` toward it, with margin, if RAM is short. For one price-server event it peaks at 6,984 bytes, so an 8 KB arena serves 24 h; on an ESP32-POE-ISO without PSRAM that raised the lowest internal heap during a fetch from 1.2 KB to 11.1 KB with the former 5,400-byte events, and to 18.2 KB with the current events and a single buffer. `OA3_MAX_VALUES` is the number of values one event holds across all its intervals, so it must be at least the interval count (25 for a day of hourly prices); below that, parsing fails with `kCapacityExceeded`. Even the 14 KB single-buffer storage does not boot from `.bss` on that board (an assert in `esp_startup_start_app`). MQTT notifications need the MQTT client's buffers and `NotificationStorage` on top; see "Choosing a configuration".
 
 ## Sizing for 24 h
 
@@ -185,6 +189,20 @@ For one price-server program (one event per day of 24 hourly intervals, 23 or 25
 | `VenConfig::poll_period_s` | 900 (the default); the price changes at interval boundaries without a request |
 
 A device that needs a longer view raises both: a 72 h window needs `OA3_MAX_EVENTS` 4. When more events overlap the window than fit, the earliest are kept and the status is `TRUNCATED`.
+
+## Library options and their costs
+
+Which configuration suits which ESP32 board, with measured flash and RAM per feature and the reasons a board is recommended, marginal or not recommended, is in esp32-firmware's [OpenADR 3 guide](https://github.com/electrification-bus/esp32-firmware/blob/main/doc/OpenADR3.md). The library's own options:
+
+| Option | Buys | Costs |
+|---|---|---|
+| Single buffer (`VenStorage::scratch` nullptr) | half the event RAM | a fetch that fails mid-parse clears the prices until the next success |
+| Smaller arena (`OA3_JSON_ARENA_SIZE`) | RAM, one-for-one | a larger event than measured fails to parse; check `arena.high_water()` |
+| Fewer events, shorter horizon (`OA3_MAX_EVENTS`, `VenConfig::horizon`) | 3,056 bytes per event slot (two slots with a double buffer) | less of the future to show or plan with |
+| MQTT notifications | price changes within seconds, fewer polls | `NotificationStorage` (7,744 bytes), the port's MQTT client and its buffers, and a TLS session |
+| `exclusive_tls` | MQTTS and HTTPS never hold TLS at once | a reconnect and re-subscribe around every HTTPS request |
+| `allow_plaintext` | no TLS session at all on a trusted LAN | not OpenADR 3 conformant; no transport security |
+| `OA3_INTERVAL_RANDOMIZE_START` | per-interval `randomizeStart` honored | 600 bytes per event |
 
 ## Task
 
