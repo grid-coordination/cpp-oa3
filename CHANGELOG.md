@@ -4,6 +4,10 @@ All notable changes to `cpp-oa3` are recorded here. Format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-14
+
+One TLS session at a time by default. On an ESP32-S3 with push-only notifications, the lowest internal heap during a fetch rose from 89.6 KB with both sessions open to 132.8-135 KB.
+
 ### Changed
 
 - `VenConfig::exclusive_tls` is on by default: the client holds one TLS session at a time, closing MQTTS around each HTTPS request. Set it false to keep both open on a board with RAM for two sessions. The POSIX demo follows, with `--shared-tls` to turn it off.

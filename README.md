@@ -6,7 +6,7 @@ The library is the core only. A port supplies HTTP, MQTT, mDNS and the clock; th
 
 ## Status
 
-0.3.0 has `oa3_model` (time, entities, streaming parse, intervals and prices) and `oa3_client` (`VenClient`, a VEN that polls, or follows MQTT notifications with or without polling), with a POSIX port. esp32-firmware's port runs it on the ESP32, ESP32-S3 and ESP32-P4 against the price server; [`doc/porting.md`](doc/porting.md) describes what a port supplies.
+0.4.0 has `oa3_model` (time, entities, streaming parse, intervals and prices) and `oa3_client` (`VenClient`, a VEN that polls, or follows MQTT notifications with or without polling), with a POSIX port. esp32-firmware's port runs it on the ESP32, ESP32-S3 and ESP32-P4 against the price server; [`doc/porting.md`](doc/porting.md) describes what a port supplies.
 
 ## Building on a host
 
