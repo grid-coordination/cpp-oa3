@@ -182,7 +182,8 @@ static void test_window_passed_to_parse() {
     client.loop();
     TEST_ASSERT_EQUAL_size_t(1, client.event_count());
     TEST_ASSERT_EQUAL_STRING("517ac65c-d418-335a-8078-596d02796a28", client.events()[0].id);
-    TEST_ASSERT_EQUAL_UINT16(1, client.events()[0].interval_count);
+    TEST_ASSERT_EQUAL_UINT16(12, client.events()[0].interval_count);
+    TEST_ASSERT_EQUAL_INT32(12, client.events()[0].intervals[0].id);
 }
 
 static void test_truncated_accepted() {

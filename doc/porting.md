@@ -108,7 +108,7 @@ With notifications, `/events` is fetched:
 - in every connect cycle: after subscribing, or with `exclusive_tls` before connecting (see below). Every connection loss starts a new cycle with discovery, so a fetch follows every break, also when the broker resumes the session;
 - every `notify_poll_period_s` while subscribed, never when it is 0, and every `poll_period_s` while the channel is down;
 - when an oversized or unparseable live notification arrives, after a wall-clock step, and on `request_poll()`;
-- once something left out for starting at or after now + `horizon` comes within the window: an event or an interval of a kept event, from a fetch or from a notification. A poll that comes first covers it instead;
+- once something left out for starting at or after now + `horizon` comes within the window: an event wholly beyond it, from a fetch or from a notification, or an interval of a held event that did not fit (`OA3_MAX_INTERVALS`, `OA3_MAX_VALUES`). A held event keeps its intervals beyond the window while they fit, so with one price-server event per day this fetch comes about once a day, when the next day's event comes within a 24 h window. A poll that comes first covers it instead;
 - while the events are truncated (more in the window than `VenStorage::capacity`), once the earliest held event ends, or at once when a notification frees a slot, so an event left out for lack of a slot is fetched.
 
 With `notify_poll_period_s` 0 (push only), a subscribed client sends no request but the last kind, and `status().retry_in_ms` is `UINT32_MAX`. While subscribed the client is never `STALE`; while the channel is down it is `STALE` after `stale_after_polls` x `poll_period_s` from the later of the last fetch and the loss. The client logs at info when it stops polling on subscribing, and when it fetches after subscribing or for the window.
@@ -207,7 +207,7 @@ For one price-server program (one event per day of 24 hourly intervals, 23 or 25
 | `OA3_JSON_ARENA_SIZE` | 16 KB (the 32-bit default) |
 | `VenConfig::poll_period_s` | 900 (the default); the price changes at interval boundaries without a request |
 
-A device that needs a longer view raises both: a 72 h window needs `OA3_MAX_EVENTS` 4. When more events overlap the window than fit, the earliest are kept and the status is `TRUNCATED`.
+The window drops the intervals that have ended and keeps a held event's intervals beyond it while they fit, so with the default 25 each held day keeps all its intervals and the prices run to the end of the last held day. A device that needs a longer view raises both: a 72 h window needs `OA3_MAX_EVENTS` 4. When more events overlap the window than fit, the earliest are kept and the status is `TRUNCATED`.
 
 ## Library options and their costs
 

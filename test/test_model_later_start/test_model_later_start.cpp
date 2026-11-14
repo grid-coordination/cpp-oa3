@@ -1,5 +1,6 @@
 // ParseOptions::later_start: the earliest start left out for lying beyond the window end.
 
+#include <stdio.h>
 #include <string.h>
 
 #include <oa3/model/parse.h>
@@ -60,14 +61,51 @@ static void test_events_after_window() {
     assert_later("2026-11-14T20:00:00Z");
 }
 
+// Intervals beyond the window are kept while they fit; the first that does not sets later.
 static void test_interval_after_window() {
+    static char json[8192];
+    int n = snprintf(json, sizeof(json),
+                     R"([{"id":"e1","programID":"p1","intervalPeriod":)"
+                     R"({"start":"2026-11-14T19:00:00Z","duration":"PT1H"},"intervals":[)");
+    for (int i = 0; i < OA3_MAX_INTERVALS + 2; ++i) {
+        n += snprintf(json + n, sizeof(json) - n, "%s{\"id\":%d}", i > 0 ? "," : "", i);
+    }
+    snprintf(json + n, sizeof(json) - n, "]}]");
+    TEST_ASSERT_EQUAL_size_t(1, parse(json));
+    TEST_ASSERT_EQUAL_UINT8(OA3_MAX_INTERVALS, events[0].interval_count);
+    // 2026-11-14T19:00Z plus OA3_MAX_INTERVALS hours.
+    TEST_ASSERT_EQUAL_INT64(1794682800 + 3600 * OA3_MAX_INTERVALS, oa3::to_unix(later));
+}
+
+static void test_interval_after_window_kept() {
     const size_t n = parse(R"([
 {"id":"e1","programID":"p1","intervalPeriod":{"start":"2026-11-14T19:00:00Z","duration":"PT1H"},"intervals":[
  {"id":0},{"id":1},{"id":2}]}
 ])");
     TEST_ASSERT_EQUAL_size_t(1, n);
-    TEST_ASSERT_EQUAL_UINT8(1, events[0].interval_count);
-    assert_later("2026-11-14T20:00:00Z");
+    TEST_ASSERT_EQUAL_UINT8(3, events[0].interval_count);
+    TEST_ASSERT_EQUAL_INT64(INT64_MAX, later.seconds);
+}
+
+// Interval 1 fills the values pool, so interval 2 (whose new type is rolled back with its
+// values) is left out, and interval 3 after it although it would fit.
+static void test_interval_after_window_values_full() {
+    static char json[4096];
+    int n = snprintf(json, sizeof(json),
+                     R"([{"id":"e1","programID":"p1","intervalPeriod":)"
+                     R"({"start":"2026-11-14T19:00:00Z","duration":"PT1H"},"intervals":[)"
+                     R"({"id":0,"payloads":[{"type":"PRICE","values":[1]}]},)"
+                     R"({"id":1,"payloads":[{"type":"PRICE","values":[)");
+    for (int i = 0; i < OA3_MAX_VALUES - 1; ++i) {
+        n += snprintf(json + n, sizeof(json) - n, "%s%d", i > 0 ? "," : "", i);
+    }
+    snprintf(json + n, sizeof(json) - n,
+             R"(]}]},{"id":2,"payloads":[{"type":"USAGE","values":[2]}]},{"id":3}]}])");
+    TEST_ASSERT_EQUAL_size_t(1, parse(json));
+    TEST_ASSERT_EQUAL_UINT8(2, events[0].interval_count);
+    TEST_ASSERT_EQUAL_UINT16(OA3_MAX_VALUES, events[0].value_count);
+    TEST_ASSERT_EQUAL_UINT8(1, events[0].type_count);
+    assert_later("2026-11-14T21:00:00Z");
 }
 
 static void test_nothing_after_window() {
@@ -96,6 +134,8 @@ static void test_only_lowered() {
     assert_later("2026-11-14T20:30:00Z");
 }
 
+// A notification's event that lies beyond the window keeps its intervals; the client, not the
+// parse, notes when it comes within the window.
 static void test_notification_after_window() {
     static const char json[] = R"({"objectType":"EVENT","operation":"CREATE","object":
 {"id":"e2","programID":"p1","intervalPeriod":{"start":"2026-11-14T22:00:00Z","duration":"PT1H"},
@@ -103,14 +143,16 @@ static void test_notification_after_window() {
     const oa3::ParseOptions o = options();
     ASSERT_RESULT(oa3::ParseResult::kOk,
                   oa3::parse_notification(json, strlen(json), arena, &note, &o));
-    TEST_ASSERT_EQUAL_UINT8(0, note.event.interval_count);
-    assert_later("2026-11-14T22:00:00Z");
+    TEST_ASSERT_EQUAL_UINT8(1, note.event.interval_count);
+    TEST_ASSERT_EQUAL_INT64(INT64_MAX, later.seconds);
 }
 
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_events_after_window);
     RUN_TEST(test_interval_after_window);
+    RUN_TEST(test_interval_after_window_kept);
+    RUN_TEST(test_interval_after_window_values_full);
     RUN_TEST(test_nothing_after_window);
     RUN_TEST(test_looping_event_after_window);
     RUN_TEST(test_only_lowered);

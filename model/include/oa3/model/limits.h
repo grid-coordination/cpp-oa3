@@ -98,9 +98,10 @@
 // Defaults for caller-owned arrays; the model takes a pointer and a capacity.
 //
 // Sizing for a window (ParseOptions::window): parse_events keeps only events that overlap the
-// window, and drops each kept event's intervals that do not (unless the event loops). An MCU
-// sizes OA3_MAX_EVENTS for the events one window can overlap and OA3_MAX_INTERVALS for the
-// intervals one event can have in it. The price server publishes, per program, one event per
+// window, and drops each kept event's intervals that have ended (unless the event loops). An
+// MCU sizes OA3_MAX_EVENTS for the events one window can overlap and OA3_MAX_INTERVALS for the
+// intervals one event has from now on; those beyond the window that do not fit are fetched
+// when they come within it. The price server publishes, per program, one event per
 // day of 24 hourly intervals (23 or 25 on DST days): fetching /events?programID=<id>, a 24 h
 // window overlaps at most 2 events, so OA3_MAX_EVENTS 2 and the default OA3_MAX_INTERVALS 25.
 // A 72 h window needs OA3_MAX_EVENTS 4. When more events overlap than fit, the ones that reach

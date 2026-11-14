@@ -883,7 +883,8 @@ static oa3::TimeInterval window_of(const char* start, const char* duration) {
     return w;
 }
 
-// The fixture holds 11-14, 11-13 and 11-12, each 24 hourly intervals from 08:00Z.
+// The fixture holds 11-14, 11-13 and 11-12, each 24 hourly intervals from 08:00Z. The window
+// drops the intervals that have ended and keeps those beyond it, which fit.
 static void test_window_keeps_overlapping_events_and_intervals() {
     size_t n = load_fixture(OA3_FIXTURE_DIR "/price_server_events.json");
     const oa3::TimeInterval window = window_of("2026-11-13T20:00:00Z", "PT24H");
@@ -893,9 +894,9 @@ static void test_window_keeps_overlapping_events_and_intervals() {
     TEST_ASSERT_EQUAL_size_t(2, count);
     TEST_ASSERT_EQUAL_STRING("EELEC-013532223-2026-11-14", events[0].event_name);
     TEST_ASSERT_EQUAL_STRING("EELEC-013532223-2026-11-13", events[1].event_name);
-    TEST_ASSERT_EQUAL_UINT16(12, events[0].interval_count);
-    TEST_ASSERT_EQUAL_UINT16(12, events[0].value_count);
-    TEST_ASSERT_EQUAL_INT32(11, events[0].intervals[11].id);
+    TEST_ASSERT_EQUAL_UINT16(24, events[0].interval_count);
+    TEST_ASSERT_EQUAL_UINT16(24, events[0].value_count);
+    TEST_ASSERT_EQUAL_INT32(23, events[0].intervals[23].id);
     TEST_ASSERT_EQUAL_UINT16(12, events[1].interval_count);
     TEST_ASSERT_EQUAL_UINT16(12, events[1].value_count);
     TEST_ASSERT_EQUAL_INT32(12, events[1].intervals[0].id);
@@ -909,7 +910,10 @@ static void test_window_keeps_overlapping_events_and_intervals() {
     TEST_ASSERT_TRUE(oa3::price_at(events, count, ux("2026-11-14T19:59:59Z"), "PRICE", &p));
     TEST_ASSERT_EQUAL_PTR(&events[0], p.event);
     TEST_ASSERT_EQUAL_UINT16(11, p.interval_index);
-    TEST_ASSERT_FALSE(oa3::price_at(events, count, ux("2026-11-14T20:00:00Z"), "PRICE", &p));
+    TEST_ASSERT_TRUE(oa3::price_at(events, count, ux("2026-11-15T07:59:59Z"), "PRICE", &p));
+    TEST_ASSERT_EQUAL_PTR(&events[0], p.event);
+    TEST_ASSERT_EQUAL_UINT16(23, p.interval_index);
+    TEST_ASSERT_FALSE(oa3::price_at(events, count, ux("2026-11-15T08:00:00Z"), "PRICE", &p));
 
     const oa3::TimeInterval none = window_of("2026-11-20T00:00:00Z", "PT24H");
     opt.window = &none;
@@ -980,7 +984,7 @@ static void test_window_inverted_is_invalid() {
     ASSERT_RESULT(ParseResult::kOk, event_from(one, &opt));
 }
 
-// The arena holds every interval sent, not only the ones a window keeps.
+// The arena holds every interval sent, not only the ones the event has room for.
 static size_t windowed_arena_use(int intervals, oa3::JsonArena& fresh) {
     size_t len = static_cast<size_t>(snprintf(scratch, sizeof(scratch), R"({"programID":"p","intervals":[)"));
     for (int i = 0; i < intervals; ++i) {
@@ -997,7 +1001,8 @@ static size_t windowed_arena_use(int intervals, oa3::JsonArena& fresh) {
     const oa3::TimeInterval window = window_of("2026-11-12T08:00:00Z", "PT24H");
     const oa3::ParseOptions opt = {nullptr, 0, &window};
     ASSERT_RESULT(ParseResult::kOk, oa3::parse_event(scratch, strlen(scratch), fresh, &event, &opt));
-    TEST_ASSERT_EQUAL_UINT16(24, event.interval_count);
+    TEST_ASSERT_EQUAL_UINT16(intervals < OA3_MAX_INTERVALS ? intervals : OA3_MAX_INTERVALS,
+                             event.interval_count);
     return fresh.high_water();
 }
 
@@ -1014,7 +1019,8 @@ static void test_window_arena_scales_with_intervals_sent() {
 }
 
 // 72 hourly intervals, inherited from the event or sequential, are more than
-// OA3_MAX_INTERVALS; a 24 h window keeps the 24 in it and makes their starts explicit.
+// OA3_MAX_INTERVALS; a 24 h window drops the 30 that have ended, keeps the 24 in it and those
+// beyond it that fit, makes their starts explicit, and sets later_start to the first left out.
 static void test_window_drops_intervals_beyond_capacity() {
     for (int sequential = 0; sequential < 2; ++sequential) {
         size_t len = static_cast<size_t>(snprintf(scratch, sizeof(scratch),
@@ -1028,18 +1034,22 @@ static void test_window_drops_intervals_beyond_capacity() {
         ASSERT_RESULT(ParseResult::kCapacityExceeded, event_from(scratch));
 
         const oa3::TimeInterval window = window_of("2026-11-02T13:00:00Z", "PT24H");
+        oa3::DateTime later{INT64_MAX, 0, 0};
         oa3::ParseOptions opt = {nullptr, 0, &window};
+        opt.later_start = &later;
         ASSERT_RESULT(ParseResult::kOk, event_from(scratch, &opt));
-        TEST_ASSERT_EQUAL_UINT16(24, event.interval_count);
-        TEST_ASSERT_EQUAL_UINT16(24, event.value_count);
+        TEST_ASSERT_EQUAL_UINT16(OA3_MAX_INTERVALS, event.interval_count);
+        TEST_ASSERT_EQUAL_UINT16(OA3_MAX_INTERVALS, event.value_count);
         TEST_ASSERT_EQUAL_INT32(30, event.intervals[0].id);
         TEST_ASSERT_EQUAL_STRING("30", event.values[0].text);
         TEST_ASSERT_TRUE(event.intervals[0].has_start);
+        const int64_t first_out = ux("2026-11-02T13:00:00Z") + 3600 * OA3_MAX_INTERVALS;
+        TEST_ASSERT_EQUAL_INT64(first_out, oa3::to_unix(later));
 
         oa3::ResolvedInterval r[OA3_MAX_INTERVALS];
-        TEST_ASSERT_EQUAL_size_t(24, oa3::resolve_intervals(event, r, OA3_MAX_INTERVALS));
+        TEST_ASSERT_EQUAL_size_t(OA3_MAX_INTERVALS, oa3::resolve_intervals(event, r, OA3_MAX_INTERVALS));
         TEST_ASSERT_EQUAL_INT64(ux("2026-11-02T13:00:00Z"), oa3::to_unix(r[0].period.start));
-        TEST_ASSERT_EQUAL_INT64(ux("2026-11-03T13:00:00Z"), oa3::to_unix(r[23].period.end));
+        TEST_ASSERT_EQUAL_INT64(first_out, oa3::to_unix(r[OA3_MAX_INTERVALS - 1].period.end));
     }
 }
 

@@ -248,23 +248,90 @@ static void test_window_entry_from_events() {
     TEST_ASSERT_EQUAL_size_t(0, rig.http.unexpected);
 }
 
-// An interval of an in-window event that starts beyond the window counts too.
+// An interval of an in-window event that starts beyond the window and does not fit counts
+// too: e1 has OA3_MAX_INTERVALS + 1 hourly intervals from 20:00Z, and the last, at 21:00Z
+// tomorrow, is left out until interval 0 ends.
 static void test_window_entry_from_interval() {
-    static const char body[] =
-        R"([{"id":"e1","programID":"b54d3d1f-bc87-4e47-bbc1-2b95958283fc","objectType":"EVENT",)"
-        R"("intervalPeriod":{"start":"2026-11-13T20:00:00Z","duration":"PT1H"},"intervals":[)"
-        R"({"id":0,"payloads":[{"type":"PRICE","values":[0.1]}]},)"
-        R"({"id":1,"intervalPeriod":{"start":"2026-11-14T20:30:00Z","duration":"PT1H"},)"
-        R"("payloads":[{"type":"PRICE","values":[0.3]}]}]}])";
+    TEST_ASSERT_EQUAL_INT(25, OA3_MAX_INTERVALS);
+    static char body[4096];
+    size_t n = static_cast<size_t>(snprintf(
+        body, sizeof(body),
+        R"([{"id":"e1","programID":"%s","objectType":"EVENT",)"
+        R"("intervalPeriod":{"start":"2026-11-13T20:00:00Z","duration":"PT1H"},"intervals":[)",
+        fakes::kProgramId));
+    for (int i = 0; i <= OA3_MAX_INTERVALS; ++i) {
+        n += static_cast<size_t>(snprintf(body + n, sizeof(body) - n,
+                                          R"(%s{"id":%d,"payloads":[{"type":"PRICE","values":[0.%d]}]})",
+                                          i > 0 ? "," : "", i, i + 1));
+    }
+    snprintf(body + n, sizeof(body) - n, "]}]");
+    TEST_ASSERT_TRUE(n + 4 < sizeof(body));
     snprintf(rig.events, sizeof(rig.events), "%s", body);
     rig.connect(push_config());
-    TEST_ASSERT_EQUAL_UINT8(1, rig.client.events()[0].interval_count);
-    run(1800);
+    TEST_ASSERT_EQUAL_UINT8(OA3_MAX_INTERVALS, rig.client.events()[0].interval_count);
+    run(3600);
     TEST_ASSERT_EQUAL_size_t(6, rig.http.requests);
     rig.http.push_ok(body, "/events?");
     run(60);
     TEST_ASSERT_EQUAL_size_t(7, rig.http.requests);
-    TEST_ASSERT_EQUAL_UINT8(2, rig.client.events()[0].interval_count);
+    TEST_ASSERT_EQUAL_UINT8(OA3_MAX_INTERVALS, rig.client.events()[0].interval_count);
+    TEST_ASSERT_EQUAL_INT32(OA3_MAX_INTERVALS,
+                            rig.client.events()[0].intervals[OA3_MAX_INTERVALS - 1].id);
+    run(24 * 3600);
+    TEST_ASSERT_EQUAL_size_t(7, rig.http.requests);
+}
+
+// Price-server shape: one event per day, 24 hourly intervals from 08:00Z, for 11-13 to 11-16.
+// Every interval of a held event fits, so only a whole day's event coming within the 24 h
+// window fetches: 11-15 at 08:00Z on 11-14, and 11-16 at 08:00Z on 11-15. Not every hour.
+static void test_daily_events_fetch_once_a_day() {
+    static char body[16384];
+    size_t n = static_cast<size_t>(snprintf(body, sizeof(body), "["));
+    for (int day = 13; day <= 16; ++day) {
+        n += static_cast<size_t>(snprintf(
+            body + n, sizeof(body) - n,
+            R"(%s{"id":"d%d","programID":"%s","objectType":"EVENT",)"
+            R"("intervalPeriod":{"start":"2026-11-%dT08:00:00Z","duration":"PT24H"},"intervals":[)",
+            day > 13 ? "," : "", day, fakes::kProgramId, day));
+        for (int h = 0; h < 24; ++h) {
+            n += static_cast<size_t>(snprintf(
+                body + n, sizeof(body) - n,
+                R"(%s{"id":%d,"intervalPeriod":{"start":"2026-11-%02dT%02d:00:00Z","duration":"PT1H"},)"
+                R"("payloads":[{"type":"PRICE","values":[0.0%02d]}]})",
+                h > 0 ? "," : "", h, day + (8 + h) / 24, (8 + h) % 24, h + 10));
+        }
+        n += static_cast<size_t>(snprintf(body + n, sizeof(body) - n, "]}"));
+    }
+    snprintf(body + n, sizeof(body) - n, "]");
+    TEST_ASSERT_TRUE(n + 2 < sizeof(body));
+
+    rig.http.push_ok(fakes::kProgramBody, "/programs/");
+    rig.http.push_ok(body, "/events?");
+    TEST_ASSERT_TRUE(rig.client.start(push_config()));
+    rig.client.loop();
+    rig.client.loop();
+    push_discovery();
+    rig.http.push_ok(body, "/events?");
+    loop_until(NotifyState::kConnected);
+    TEST_ASSERT_EQUAL_size_t(6, rig.http.requests);
+    TEST_ASSERT_EQUAL_size_t(2, rig.client.event_count());
+    TEST_ASSERT_EQUAL_UINT8(24, rig.client.events()[1].interval_count);
+
+    rig.http.push_ok(body, "/events?", 2);
+    run(12 * 3600);
+    TEST_ASSERT_EQUAL_size_t(6, rig.http.requests);
+    run(60);
+    TEST_ASSERT_EQUAL_size_t(7, rig.http.requests);
+    TEST_ASSERT_EQUAL_STRING("d15", rig.client.events()[rig.client.event_count() - 1].id);
+    run(24 * 3600 - 60);
+    TEST_ASSERT_EQUAL_size_t(7, rig.http.requests);
+    run(60);
+    TEST_ASSERT_EQUAL_size_t(8, rig.http.requests);
+    TEST_ASSERT_EQUAL_STRING("d16", rig.client.events()[rig.client.event_count() - 1].id);
+    run(12 * 3600 - 60);
+    TEST_ASSERT_EQUAL_size_t(8, rig.http.requests);
+    TEST_ASSERT_EQUAL_size_t(0, rig.http.unexpected);
+    TEST_ASSERT_TRUE(rig.client.price().active);
 }
 
 static void test_window_entry_from_notification(bool exclusive) {
@@ -667,6 +734,7 @@ int main() {
     RUN_TEST(test_gap_snapshot_nonzero_period);
     RUN_TEST(test_window_entry_from_events);
     RUN_TEST(test_window_entry_from_interval);
+    RUN_TEST(test_daily_events_fetch_once_a_day);
     RUN_TEST(test_window_entry_from_notification_shared);
     RUN_TEST(test_window_entry_from_notification_exclusive);
     RUN_TEST(test_window_entry_before_next_poll);

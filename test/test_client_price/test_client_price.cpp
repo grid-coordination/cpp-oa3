@@ -136,7 +136,8 @@ static void test_no_fire_after_refetch_with_same_value() {
     TEST_ASSERT_EQUAL_STRING("0.043034", client.price().text);
 }
 
-// The 24 h window of the fetch at 2026-11-13T20:00Z ends the data at 2026-11-14T20:00Z.
+// The fetch at 2026-11-13T20:00Z keeps all of the event that its 24 h window reaches into,
+// so the data ends with that event at 2026-11-15T08:00Z.
 static void test_fires_on_change_to_inactive() {
     oa3::VenConfig c = config();
     c.poll_period_s = 200000;
@@ -147,10 +148,11 @@ static void test_fires_on_change_to_inactive() {
     client.loop();
     client.loop();
     TEST_ASSERT_EQUAL_size_t(1, rec.prices);
-    clk.advance_s(86399);
+    clk.advance_s(129599);
     client.loop();
     TEST_ASSERT_EQUAL_size_t(2, rec.prices);
     TEST_ASSERT_TRUE(rec.last_price().active);
+    TEST_ASSERT_EQUAL_INT32(23, rec.last_price().interval_id);
     clk.advance_s(1);
     client.loop();
     TEST_ASSERT_EQUAL_size_t(3, rec.prices);

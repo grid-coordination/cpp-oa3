@@ -27,11 +27,12 @@ struct ParseOptions {
     // every type.
     const char* const* payload_types;
     size_t payload_type_count;
-    // Keeps only what overlaps this window, e.g. [now, now + 24 h). parse_events skips an event
-    // outside it without using a slot; every event parse drops the intervals outside it, unless
-    // the event has a duration (it may loop), and writes the resolved period into each interval
-    // kept after a dropped one. An event with no resolvable interval period is kept. nullptr
-    // keeps everything; an end before the start is kInvalidField.
+    // Keeps what overlaps this window, e.g. [now, now + 24 h). parse_events skips an event
+    // outside it without using a slot. Every event parse drops the intervals that end before it
+    // and keeps those that start beyond it while they fit (an interval slot, and room for their
+    // values and types), unless the event has a duration (it may loop), and writes the resolved
+    // period into each interval kept after a dropped one. An event with no resolvable interval
+    // period is kept. nullptr keeps everything; an end before the start is kInvalidField.
     const TimeInterval* window;
     // parse_events and append_events skip, without using a slot, an event whose programID is
     // present and differs from program_id (when non-null), and one that targets_match()
@@ -39,9 +40,9 @@ struct ParseOptions {
     const char* program_id = nullptr;
     const char* const* ven_targets = nullptr;
     size_t ven_target_count = 0;
-    // With a window that has an end: lowered to the start of each interval, or looping event,
-    // left out for starting at or after that end, when earlier. The caller sets it first, e.g.
-    // to {INT64_MAX, 0, 0}.
+    // With a window that has an end: lowered to the start of each event parse_events skips, or
+    // interval that does not fit, for starting at or after that end, when earlier. The caller
+    // sets it first, e.g. to {INT64_MAX, 0, 0}.
     DateTime* later_start = nullptr;
 };
 

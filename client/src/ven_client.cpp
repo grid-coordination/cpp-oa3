@@ -150,16 +150,23 @@ bool in_list(const char (&list)[OA3_MQTT_TOPICS_MAX][OA3_TOPIC_MAX + 1], size_t 
 }
 
 // Where an event meets the window, by the rule parse_events applies (parse.cpp fit_event):
-// first is its earliest instant in the window.
+// first is its earliest instant in the window, and later the earliest start at or after the
+// window end of what lies outside it.
 struct WindowFit {
     bool in_window;
     DateTime first;
+    DateTime later;
 };
+
+bool after_end(const DateTime& t, const TimeInterval& window) {
+    return !window.end_indefinite && compare(t, window.end) >= 0;
+}
 
 WindowFit window_fit(const Event& ev, const TimeInterval& window) {
     ExtentBuilder extent;
     bool hit = false;
     DateTime first{};
+    DateTime later = kNever;
     IntervalResolver resolver(ev);
     ResolvedInterval r;
     while (resolver.next(&r)) {
@@ -168,19 +175,25 @@ WindowFit window_fit(const Event& ev, const TimeInterval& window) {
             (!hit || compare(r.period.start, first) < 0)) {
             hit = true;
             first = r.period.start;
+        } else if (r.has_period && after_end(r.period.start, window)) {
+            lower(&later, r.period.start);
         }
     }
     const EventExtent x = extent.finish(ev.has_duration, ev.duration);
-    WindowFit f{true, DateTime{INT64_MAX, 0, 0}};
+    WindowFit f{true, kNever, kNever};
     if (!x.has_period) {
         return f;
     }
     if (x.looping) {
         f.in_window = intersects(x.span, window);
         f.first = x.span.start;
+        if (!f.in_window && after_end(x.span.start, window)) {
+            f.later = x.span.start;
+        }
     } else {
         f.in_window = hit;
         f.first = first;
+        f.later = later;
     }
     if (compare(f.first, window.start) < 0) {
         f.first = window.start;
@@ -1550,18 +1563,18 @@ bool VenClient::upsert_event(const Event& ev) {
     }
     const bool targeted = _config.target_count == 0 ||
                           targets_match(ev.targets, _config.targets, _config.target_count);
-    // The parse drops intervals outside the window, so an event with none left lies outside.
-    WindowFit fit{true, DateTime{}};
+    // The parse drops intervals that have ended, so an event with none left lies outside. One
+    // that starts beyond the window may keep its intervals, and is fetched again when it
+    // comes within it.
+    WindowFit fit{true, DateTime{}, kNever};
     if (_has_msg_window) {
-        fit = ev.interval_count == 0 ? WindowFit{false, DateTime{}} : window_fit(ev, _msg_window);
+        fit = ev.interval_count == 0 ? WindowFit{false, DateTime{}, kNever}
+                                     : window_fit(ev, _msg_window);
     }
     if (targeted) {
         lower(&_later_start, _msg_later);
-        if (!fit.in_window && ev.has_duration && !_msg_window.end_indefinite) {
-            const EventExtent x = event_extent(ev);
-            if (x.has_period && compare(x.span.start, _msg_window.end) >= 0) {
-                lower(&_later_start, x.span.start);
-            }
+        if (!fit.in_window) {
+            lower(&_later_start, fit.later);
         }
     }
     if (!targeted || !fit.in_window) {

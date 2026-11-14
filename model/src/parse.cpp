@@ -823,22 +823,29 @@ void lower(DateTime* later, const DateTime& t) {
     }
 }
 
-// False when the interval lies outside the window. Out of line so that the ResolvedInterval
-// is off the stack while payloads are copied.
-OA3_NOINLINE bool keep_in_window(const TimeInterval& window, bool dropped,
-                                 IntervalResolver* resolver, Interval* iv, DateTime* later) {
+enum class WindowPlace : uint8_t { kIn, kPast, kBeyond };
+
+// An interval that has ended is dropped. One that starts beyond the window is kept while it
+// fits, so a client need not fetch again when time brings it in; the caller drops it, and
+// lowers later, only when it does not fit. Out of line so that the ResolvedInterval is off
+// the stack while payloads are copied.
+OA3_NOINLINE WindowPlace keep_in_window(const TimeInterval& window, bool dropped,
+                                        IntervalResolver* resolver, Interval* iv,
+                                        DateTime* start) {
     ResolvedInterval r;
     resolver->resolve(*iv, &r);
+    WindowPlace place = WindowPlace::kIn;
     if (r.has_period && !intersects(r.period, window)) {
-        if (after_window(r.period.start, window)) {
-            lower(later, r.period.start);
+        if (!after_window(r.period.start, window)) {
+            return WindowPlace::kPast;
         }
-        return false;
+        *start = r.period.start;
+        place = WindowPlace::kBeyond;
     }
     if (dropped) {
         make_explicit(r, iv);
     }
-    return true;
+    return place;
 }
 
 ParseResult copy_intervals(JsonVariantConst v, Event* ev, const ParseOptions* opt) {
@@ -858,6 +865,8 @@ ParseResult copy_intervals(JsonVariantConst v, Event* ev, const ParseOptions* op
     }
     IntervalResolver resolver(ev->has_interval_period ? &ev->interval_period : nullptr);
     bool dropped = false;
+    // Once one beyond the window does not fit, none after it is kept, so no gap opens.
+    bool beyond_dropped = false;
     Interval spare;
     for (JsonVariantConst iv : v.as<JsonArrayConst>()) {
         if (!iv.is<JsonObjectConst>()) {
@@ -876,16 +885,36 @@ ParseResult copy_intervals(JsonVariantConst v, Event* ev, const ParseOptions* op
         }
         out->id = id.as<int32_t>();
         OA3_TRY(copy_period(get(o, "intervalPeriod", "interval_period"), out));
+        WindowPlace place = WindowPlace::kIn;
+        DateTime start{};
         if (window != nullptr) {
-            if (!keep_in_window(*window, dropped, &resolver, out, opt->later_start)) {
+            place = keep_in_window(*window, dropped, &resolver, out, &start);
+            if (place == WindowPlace::kPast) {
                 dropped = true;
+                continue;
+            }
+            if (place == WindowPlace::kBeyond && (full || beyond_dropped)) {
+                lower(opt->later_start, start);
+                dropped = true;
+                beyond_dropped = true;
                 continue;
             }
             if (full) {
                 return ParseResult::kCapacityExceeded;
             }
         }
-        OA3_TRY(copy_payloads(o["payloads"], ev, out, opt));
+        const uint16_t values = ev->value_count;
+        const uint8_t types = ev->type_count;
+        const ParseResult pr = copy_payloads(o["payloads"], ev, out, opt);
+        if (pr == ParseResult::kCapacityExceeded && place == WindowPlace::kBeyond) {
+            ev->value_count = values;
+            ev->type_count = types;
+            lower(opt->later_start, start);
+            dropped = true;
+            beyond_dropped = true;
+            continue;
+        }
+        OA3_TRY(pr);
         ++ev->interval_count;
     }
     return ParseResult::kOk;
