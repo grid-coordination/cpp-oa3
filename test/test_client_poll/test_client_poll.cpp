@@ -98,6 +98,7 @@ static void test_first_fetch() {
     oa3::DateTime t;
     TEST_ASSERT_TRUE(client.last_fetch(&t));
     TEST_ASSERT_EQUAL_INT64(clk.wall.seconds, t.seconds);
+    TEST_ASSERT_TRUE(client.events_revision() != 0);
     TEST_ASSERT_EQUAL_size_t(1, rec.prices);
     TEST_ASSERT_TRUE(rec.last_price().active);
     TEST_ASSERT_EQUAL_STRING("0.043034", rec.last_price().text);
@@ -465,7 +466,9 @@ static void test_single_buffer_stop_between_pages_clears() {
     http.push_ok(events_page(page_a, sizeof(page_a), "now", 50, 20), "&skip=0&limit=50");
     single.loop();
     TEST_ASSERT_EQUAL_size_t(OA3_MAX_EVENTS, single.event_count());
+    const uint32_t before = single.events_revision();
     single.stop();
+    TEST_ASSERT_TRUE(single.events_revision() != before);
     TEST_ASSERT_EQUAL_size_t(0, single.event_count());
     oa3::DateTime t;
     TEST_ASSERT_FALSE(single.last_fetch(&t));

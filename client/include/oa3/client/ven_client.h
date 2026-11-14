@@ -226,6 +226,9 @@ public:
     // Valid until the next loop() or start().
     const Event* events() const { return _events; }
     size_t event_count() const { return _event_count; }
+    // Changes whenever the stored events or program change (a fetch, a notification, a clear),
+    // so a display can redraw a forecast only when it is stale.
+    uint32_t events_revision() const { return _events_revision; }
     // The wall-clock time of the last successful events fetch; false before one.
     bool last_fetch(DateTime* out) const;
     // The broker in use; nullptr before one is selected.
@@ -296,6 +299,7 @@ private:
     void apply_notification(bool retained);
     bool upsert_event(const Event& ev);
     void remove_event(size_t i);
+    void events_changed();
     size_t find_event(const char* id) const;
 
     HttpTransport* _http;
@@ -336,6 +340,7 @@ private:
     DateTime _last_fetch;
     bool _has_fetch;
     bool _data_changed;
+    uint32_t _events_revision;
 
     VenStatusInfo _status;
     VenStatus _reported_status;

@@ -14,6 +14,7 @@ All notable changes to `cpp-oa3` are recorded here. Format follows [Keep a Chang
 
 ### Added
 
+- `VenClient::events_revision()`, which changes whenever the stored events or program change, so a display can redraw a forecast from `price_schedule()` only when it is stale.
 - A single event buffer: `VenStorage::scratch` may be nullptr, and `StaticVenStorage<N, ArenaSize, false>` gives that form. A fetch then parses into the live events, and one that fails after its response began to parse clears them and reports `has_data` false until a later fetch succeeds. With `OA3_MAX_EVENTS=2` and an 8 KB arena the storage is 14,344 bytes on the ESP32.
 
 ## [0.2.0] - 2026-11-14

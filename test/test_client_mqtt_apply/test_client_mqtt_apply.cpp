@@ -56,6 +56,24 @@ static void test_create_appends() {
     TEST_ASSERT_EQUAL_size_t(6, rig.http.requests);
 }
 
+static void test_events_revision_tracks_changes() {
+    connect();
+    const uint32_t r0 = rig.client.events_revision();
+    rig.client.loop();
+    TEST_ASSERT_EQUAL_UINT32(r0, rig.client.events_revision());
+    push_event(0, "UPDATE", "e1", "2026-11-13T20:00:00Z", "0.25", "2026-11-13T19:00:00Z");
+    rig.client.loop();
+    const uint32_t r1 = rig.client.events_revision();
+    TEST_ASSERT_TRUE(r1 != r0);
+    push_event(1, "UPDATE", "e1", "2026-11-13T20:00:00Z", "0.3", "2026-11-13T18:00:00Z");
+    rig.client.loop();
+    TEST_ASSERT_EQUAL_UINT32(r1, rig.client.events_revision());
+    push_event(2, "DELETE", "e1", "2026-11-13T20:00:00Z", "0.25");
+    rig.client.loop();
+    TEST_ASSERT_TRUE(rig.client.events_revision() != r1);
+    assert_ids(nullptr);
+}
+
 static void test_update_fires_price_without_http() {
     connect();
     const size_t prices = rig.rec.prices;
@@ -319,6 +337,7 @@ static void test_other_objects_and_operations_ignored() {
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_create_appends);
+    RUN_TEST(test_events_revision_tracks_changes);
     RUN_TEST(test_update_fires_price_without_http);
     RUN_TEST(test_post_and_put_read_as_create_and_update);
     RUN_TEST(test_create_of_stored_id_replaces);

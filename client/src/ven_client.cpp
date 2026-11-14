@@ -204,6 +204,7 @@ VenClient::VenClient(HttpTransport& http, Clock& clock, const VenStorage& storag
       _last_fetch(),
       _has_fetch(false),
       _data_changed(false),
+      _events_revision(0),
       _status(),
       _reported_status(VenStatus::kStopped),
       _status_before_clock(VenStatus::kStopped),
@@ -380,6 +381,7 @@ bool VenClient::start(const VenConfig& config) {
     _event_count = 0;
     _scratch_count = 0;
     _events_dirty = false;
+    ++_events_revision;
     _due_now = true;
     _stale = false;
     _has_last_loop = false;
@@ -409,6 +411,7 @@ void VenClient::stop() {
     if (_scratch == nullptr && _event_skip != 0) {
         _event_count = 0;
         _has_fetch = false;
+        ++_events_revision;
     }
     _event_skip = 0;
     _phase = Phase::kStopped;
@@ -588,7 +591,7 @@ bool VenClient::fetch_failed(VenStatus kind, const DateTime& now, uint32_t now_m
     if (_events_dirty) {
         _events_dirty = false;
         _event_count = 0;
-        _data_changed = true;
+        events_changed();
         update_price(now);
         _has_fetch = false;
         _stale = false;
@@ -760,7 +763,7 @@ bool VenClient::poll(const DateTime& now, uint32_t now_ms) {
     }
     _events_dirty = false;
 
-    _data_changed = true;
+    events_changed();
     _has_fetch = true;
     _last_fetch = now;
     _last_success_ms = now_ms;
@@ -1301,7 +1304,7 @@ void VenClient::mqtt_service(const DateTime& now, uint32_t now_ms) {
         log_printf(_config.log, LogLevel::kInfo, "program %s deleted; resolving again", _program.id);
         mqtt_reset();
         _event_count = 0;
-        _data_changed = true;
+        events_changed();
         update_price(now);
         _has_fetch = false;
         _stale = false;
@@ -1369,6 +1372,11 @@ size_t VenClient::find_event(const char* id) const {
         }
     }
     return _event_count;
+}
+
+void VenClient::events_changed() {
+    _data_changed = true;
+    ++_events_revision;
 }
 
 void VenClient::remove_event(size_t i) {
@@ -1468,7 +1476,7 @@ void VenClient::apply_notification(bool retained) {
         log_printf(_config.log, LogLevel::kInfo, "notification %s event %s%s", to_string(n.operation),
                    ev.id, changed ? "" : ", no change");
         if (changed) {
-            _data_changed = true;
+            events_changed();
             ++_status.notifications;
         }
         return;
@@ -1487,7 +1495,7 @@ void VenClient::apply_notification(bool retained) {
                 return;
             }
             _program = n.program;
-            _data_changed = true;
+            events_changed();
         } else if (n.operation == Operation::kDelete) {
             _program_deleted = true;
         } else {
