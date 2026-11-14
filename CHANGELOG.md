@@ -4,6 +4,10 @@ All notable changes to `cpp-oa3` are recorded here. Format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-14
+
+Leaner storage for an ESP32 without PSRAM, where polling with one event array and an 8 KB arena now leaves 19 KB of internal heap during a fetch (1.6-3.6 KB on 0.2.0), and push-only notifications, which on an ESP32-POE-ISO-WROVER hold one TLS session and fetch only after a break or when a new event comes within the window.
+
 ### Changed
 
 - A smaller `Event`, 3,056 bytes with the default capacities instead of 5,400 (an `Interval` is 48 bytes instead of 144), with breaking changes to the entity structs:
