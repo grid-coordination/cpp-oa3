@@ -6,10 +6,16 @@ All notable changes to `cpp-oa3` are recorded here. Format follows [Keep a Chang
 
 ### Changed
 
+- A smaller `Event`, 3,056 bytes with the default capacities instead of 5,400 (an `Interval` is 48 bytes instead of 144), with breaking changes to the entity structs:
+  - Each event stores its payload type strings once, in `types` (`OA3_MAX_EVENT_TYPES`, default 4); `Payload::type` is replaced by `type_index`, read through `payload_type(event, payload)`. `find_payload()` takes the event, and `find_type()` is new. More distinct types than fit is `kCapacityExceeded`.
+  - Entities hold durations as `CompactDuration` (20 bytes against `Duration`'s 36): calendar months, calendar days and elapsed seconds and nanoseconds, the parts `add()` applies, so every addition gives the same instant. `to_compact()` and `to_duration()` convert; `to_duration()` gives normalized fields (P14M as P1Y2M, P2W as P14D, PT90M as PT1H30M). An entity duration whose total months, days or seconds (hours, minutes and seconds together; 2^31 seconds is about 68 years) leave int32 is now `kInvalidField`. `Duration` itself and `parse_duration()`, `format_duration()` and `add()` are unchanged.
+  - `Interval` holds its period in its own fields (`start`, `duration`, `has_start`, `has_duration`, and `has_interval_period` when the member was present) instead of an `IntervalPeriod`. `IntervalResolver::resolve()` takes the `Interval`.
+  - An interval's own `randomizeStart` is kept only when the build defines `OA3_INTERVAL_RANDOMIZE_START`; otherwise it is ignored and the event's applies to every interval.
 - `start()` refuses a base URL that is not `https://` unless `allow_plaintext` is set. Schemes are case-insensitive.
 
 ### Added
 
+- A single event buffer: `VenStorage::scratch` may be nullptr, and `StaticVenStorage<N, ArenaSize, false>` gives that form. A fetch then parses into the live events, and one that fails after its response began to parse clears them and reports `has_data` false until a later fetch succeeds. With `OA3_MAX_EVENTS=2` and an 8 KB arena the storage is 14,344 bytes on the ESP32.
 - `price_schedule()`: the prices in force across a bounded window, one step per span `price_at()` reports, with gaps as steps without a value, for drawing a forecast.
 - MQTT notifications (milestone M4), with `VenConfig::notifications = NotificationMode::kMqtt`, a port's `MqttSession` and a caller-owned `NotificationStorage` in `VenStorage::notifications` (10,088 bytes on the ESP32; with notifications off the `ci/esp32` build uses 504 bytes more RAM than without M4):
   - After the program resolves and the first `/events` fetch, the client reads `/notifiers` (or uses `mqtt_uri`), fetches the program's events topics and, with `follow_program`, the program's own topics, connects anonymously (MQTTS unless `allow_plaintext`), subscribes at QoS 1 (the `ALL` topic when the VTN lists one), and fetches `/events` again. Every reconnect repeats the whole cycle: topics are fetched again, the subscriptions are set-diffed when the broker kept the session, and `/events` is fetched again.

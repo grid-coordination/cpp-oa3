@@ -296,8 +296,8 @@ static void test_start_rejections() {
 
     oa3::VenClient bad_events(http, clk, oa3::VenStorage{nullptr, e2, 1, &small_arena});
     TEST_ASSERT_FALSE(bad_events.start(config()));
-    oa3::VenClient bad_scratch(http, clk, oa3::VenStorage{e1, nullptr, 1, &small_arena});
-    TEST_ASSERT_FALSE(bad_scratch.start(config()));
+    oa3::VenClient single(http, clk, oa3::VenStorage{e1, nullptr, 1, &small_arena});
+    TEST_ASSERT_TRUE(single.start(config()));
     oa3::VenClient bad_capacity(http, clk, oa3::VenStorage{e1, e2, 0, &small_arena});
     TEST_ASSERT_FALSE(bad_capacity.start(config()));
     oa3::VenClient bad_arena(http, clk, oa3::VenStorage{e1, e2, 1, nullptr});

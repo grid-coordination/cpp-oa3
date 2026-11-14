@@ -153,23 +153,42 @@ struct NotificationStorage {
 };
 
 // Caller-owned memory, so a port can place it (e.g. in PSRAM). A fetch parses into scratch
-// and swaps it with events on success, so a failure keeps the last good events.
+// and swaps it with events on success, so a failure keeps the last good events. With scratch
+// nullptr, a fetch parses into events directly, saving capacity events of RAM: a fetch that
+// fails once its response has begun to parse clears them, logs a warning, and reports has_data
+// false and no price until a fetch succeeds. A request that fails before parsing leaves them.
 struct VenStorage {
     Event* events;
-    Event* scratch;
+    Event* scratch;   // may be nullptr
     size_t capacity;  // elements in each array
     JsonArena* arena;
     NotificationStorage* notifications = nullptr;  // required with NotificationMode::kMqtt
 };
 
-template <size_t N = OA3_MAX_EVENTS, size_t ArenaSize = OA3_JSON_ARENA_SIZE>
+namespace detail {
+
+template <size_t N, bool Present>
+struct ScratchEvents {
+    Event* get() { return _events; }
+    Event _events[N];
+};
+
+template <size_t N>
+struct ScratchEvents<N, false> {
+    Event* get() { return nullptr; }
+};
+
+}  // namespace detail
+
+// DoubleBuffer false gives the single-buffer form (VenStorage::scratch nullptr).
+template <size_t N = OA3_MAX_EVENTS, size_t ArenaSize = OA3_JSON_ARENA_SIZE, bool DoubleBuffer = true>
 class StaticVenStorage {
 public:
-    VenStorage storage() { return VenStorage{_events, _scratch, N, &_arena}; }
+    VenStorage storage() { return VenStorage{_events, _scratch.get(), N, &_arena}; }
 
 private:
     Event _events[N];
-    Event _scratch[N];
+    detail::ScratchEvents<N, DoubleBuffer> _scratch;
     StaticJsonArena<ArenaSize> _arena;
 };
 
@@ -244,6 +263,7 @@ private:
     bool resolve_by_name(uint32_t now_ms);
     bool poll(const DateTime& now, uint32_t now_ms);
     bool fail(VenStatus kind, uint32_t now_ms);
+    bool fetch_failed(VenStatus kind, const DateTime& now, uint32_t now_ms);
     void not_found(uint32_t now_ms);
     void resolved();
     uint32_t ms_until_request(uint32_t now_ms) const;
@@ -301,9 +321,10 @@ private:
     bool _event_truncated;
 
     Event* _events;
-    Event* _scratch;
+    Event* _scratch;  // nullptr with a single buffer
     size_t _event_count;
     size_t _scratch_count;
+    bool _events_dirty;  // single buffer: a fetch has begun to parse into _events
 
     bool _due_now;
     bool _stale;

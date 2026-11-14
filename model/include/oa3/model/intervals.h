@@ -12,7 +12,8 @@ namespace oa3 {
 // An interval with event.intervalPeriod inheritance applied, as python-oa3
 // Event.resolved_intervals() (models.py:272-350), plus two spec rules python lacks: an
 // interval start of 0001-01-01T00:00:00 follows the previous interval (User_Guide.md:640-645),
-// and randomizeStart is inherited from the event (User_Guide.md:635).
+// and randomizeStart is inherited from the event (User_Guide.md:635). Without
+// OA3_INTERVAL_RANDOMIZE_START every interval takes the event's randomizeStart.
 struct ResolvedInterval {
     uint16_t index;  // into event.intervals
     int32_t id;
@@ -30,10 +31,10 @@ struct ResolvedInterval {
 class IntervalResolver {
 public:
     explicit IntervalResolver(const Event& event);
-    // Without an Event: pass each interval's period, in order, to resolve().
+    // Without an Event: pass each interval, in order, to resolve(). Its payloads are not read.
     explicit IntervalResolver(const IntervalPeriod* event_period);
     bool next(ResolvedInterval* out);
-    void resolve(const IntervalPeriod* interval_period, int32_t id, ResolvedInterval* out);
+    void resolve(const Interval& interval, ResolvedInterval* out);
     void reset();
 
 private:
@@ -64,7 +65,7 @@ class ExtentBuilder {
 public:
     ExtentBuilder();
     void add(const ResolvedInterval& r);
-    EventExtent finish(bool has_duration, const Duration& duration) const;
+    EventExtent finish(bool has_duration, const CompactDuration& duration) const;
 
 private:
     bool _any;

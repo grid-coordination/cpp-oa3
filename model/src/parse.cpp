@@ -458,12 +458,13 @@ ParseResult copy_datetime(JsonVariantConst v, bool* has, DateTime* out) {
     return ParseResult::kOk;
 }
 
-ParseResult copy_duration(JsonVariantConst v, bool* has, Duration* out) {
+ParseResult copy_duration(JsonVariantConst v, bool* has, CompactDuration* out) {
     *has = false;
     if (v.isNull() || is_blank(v)) {
         return ParseResult::kOk;
     }
-    if (!v.is<const char*>() || !parse_duration(v.as<const char*>(), out)) {
+    Duration d;
+    if (!v.is<const char*>() || !parse_duration(v.as<const char*>(), &d) || !to_compact(d, out)) {
         return ParseResult::kInvalidField;
     }
     *has = true;
@@ -492,6 +493,28 @@ ParseResult copy_period(JsonVariantConst v, bool* has, IntervalPeriod* out) {
     OA3_TRY(copy_duration(get(o, "randomizeStart", "randomize_start"), &out->has_randomize_start,
                           &out->randomize_start));
     *has = true;
+    return ParseResult::kOk;
+}
+
+ParseResult copy_period(JsonVariantConst v, Interval* out) {
+    out->has_interval_period = false;
+    if (v.isNull()) {
+        return ParseResult::kOk;
+    }
+    if (!v.is<JsonObjectConst>()) {
+        return ParseResult::kInvalidField;
+    }
+    JsonObjectConst o = v.as<JsonObjectConst>();
+    bool has = false;
+    OA3_TRY(copy_datetime(o["start"], &has, &out->start));
+    out->has_start = has;
+    OA3_TRY(copy_duration(o["duration"], &has, &out->duration));
+    out->has_duration = has;
+#ifdef OA3_INTERVAL_RANDOMIZE_START
+    OA3_TRY(copy_duration(get(o, "randomizeStart", "randomize_start"), &has, &out->randomize_start));
+    out->has_randomize_start = has;
+#endif
+    out->has_interval_period = true;
     return ParseResult::kOk;
 }
 
@@ -723,6 +746,21 @@ ParseResult copy_values(JsonVariantConst v, Event* ev, Payload* p) {
     return ParseResult::kOk;
 }
 
+ParseResult intern_type(JsonVariantConst type, Event* ev, uint8_t* index) {
+    const char* s = type.as<const char*>();
+    const int found = find_type(*ev, s);
+    if (found >= 0) {
+        *index = static_cast<uint8_t>(found);
+        return ParseResult::kOk;
+    }
+    if (ev->type_count >= OA3_MAX_EVENT_TYPES) {
+        return ParseResult::kCapacityExceeded;
+    }
+    OA3_TRY(copy_string(type, ev->types[ev->type_count], sizeof(ev->types[0]), true));
+    *index = ev->type_count++;
+    return ParseResult::kOk;
+}
+
 ParseResult copy_payloads(JsonVariantConst payloads, Event* ev, Interval* out, const ParseOptions* opt) {
     out->payload_count = 0;
     if (payloads.isNull()) {
@@ -746,7 +784,7 @@ ParseResult copy_payloads(JsonVariantConst payloads, Event* ev, Interval* out, c
             return ParseResult::kCapacityExceeded;
         }
         Payload* p = &out->payloads[out->payload_count];
-        OA3_TRY(copy_string(type, p->type, sizeof(p->type), true));
+        OA3_TRY(intern_type(type, ev, &p->type_index));
         OA3_TRY(copy_values(pv["values"], ev, p));
         ++out->payload_count;
     }
@@ -755,14 +793,13 @@ ParseResult copy_payloads(JsonVariantConst payloads, Event* ev, Interval* out, c
 
 // The resolved period becomes the interval's own, so it no longer depends on dropped ones.
 void make_explicit(const ResolvedInterval& r, Interval* out) {
-    IntervalPeriod& ip = out->interval_period;
     out->has_interval_period = true;
-    ip.has_start = r.has_start;
-    ip.start = r.start;
-    ip.has_duration = r.has_duration;
-    ip.duration = r.duration;
-    ip.has_randomize_start = r.has_randomize_start;
-    ip.randomize_start = r.randomize_start;
+    out->has_start = r.has_start;
+    out->start = r.start;
+    out->has_duration = r.has_duration && to_compact(r.duration, &out->duration);
+#ifdef OA3_INTERVAL_RANDOMIZE_START
+    out->has_randomize_start = r.has_randomize_start && to_compact(r.randomize_start, &out->randomize_start);
+#endif
 }
 
 const TimeInterval* window_of(const ParseOptions* opt) {
@@ -779,7 +816,7 @@ bool window_inverted(const ParseOptions* opt) {
 OA3_NOINLINE bool keep_in_window(const TimeInterval& window, bool dropped,
                                  IntervalResolver* resolver, Interval* iv) {
     ResolvedInterval r;
-    resolver->resolve(iv->has_interval_period ? &iv->interval_period : nullptr, iv->id, &r);
+    resolver->resolve(*iv, &r);
     if (r.has_period && !intersects(r.period, window)) {
         return false;
     }
@@ -792,6 +829,7 @@ OA3_NOINLINE bool keep_in_window(const TimeInterval& window, bool dropped,
 ParseResult copy_intervals(JsonVariantConst v, Event* ev, const ParseOptions* opt) {
     ev->interval_count = 0;
     ev->value_count = 0;
+    ev->type_count = 0;
     if (v.isNull()) {
         return ParseResult::kOk;
     }
@@ -822,8 +860,7 @@ ParseResult copy_intervals(JsonVariantConst v, Event* ev, const ParseOptions* op
             return ParseResult::kInvalidField;
         }
         out->id = id.as<int32_t>();
-        OA3_TRY(copy_period(get(o, "intervalPeriod", "interval_period"), &out->has_interval_period,
-                            &out->interval_period));
+        OA3_TRY(copy_period(get(o, "intervalPeriod", "interval_period"), out));
         if (window != nullptr) {
             if (!keep_in_window(*window, dropped, &resolver, out)) {
                 dropped = true;
@@ -977,7 +1014,7 @@ public:
     }
 
     // An event without a resolvable period is kept, and is the first to give way.
-    WindowFit finish(bool has_duration, const Duration& duration) const {
+    WindowFit finish(bool has_duration, const CompactDuration& duration) const {
         const EventExtent x = _extent.finish(has_duration, duration);
         WindowFit f{true, DateTime{INT64_MAX, 0, 0}};
         if (!x.has_period) {
@@ -1005,7 +1042,7 @@ private:
 
 OA3_NOINLINE ParseResult fit_json(JsonObjectConst o, const TimeInterval& window, WindowFit* out) {
     bool has_duration = false;
-    Duration duration{};
+    CompactDuration duration{};
     OA3_TRY(copy_duration(o["duration"], &has_duration, &duration));
     bool has_period = false;
     IntervalPeriod period{};
@@ -1015,11 +1052,10 @@ OA3_NOINLINE ParseResult fit_json(JsonObjectConst o, const TimeInterval& window,
     JsonVariantConst intervals = o["intervals"];
     if (intervals.is<JsonArrayConst>()) {
         for (JsonVariantConst iv : intervals.as<JsonArrayConst>()) {
-            bool has = false;
-            IntervalPeriod ip{};
-            OA3_TRY(copy_period(get(iv.as<JsonObjectConst>(), "intervalPeriod", "interval_period"), &has, &ip));
+            Interval ip{};
+            OA3_TRY(copy_period(get(iv.as<JsonObjectConst>(), "intervalPeriod", "interval_period"), &ip));
             ResolvedInterval r;
-            resolver.resolve(has ? &ip : nullptr, 0, &r);
+            resolver.resolve(ip, &r);
             fit.add(r);
         }
     }

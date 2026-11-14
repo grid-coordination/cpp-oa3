@@ -79,6 +79,24 @@ bool is_negative(const Duration& d);
 // "P9999Y" means indefinite (User_Guide 7.3).
 bool is_indefinite(const Duration& d);
 
+// A Duration as the entities store it, 20 bytes against 36: calendar months, calendar days and
+// elapsed time, the three parts add() applies, so add() gives the same instant for either form.
+// The designators are not kept: P1Y2M and P14M store alike, as do P2W and P14D, and PT90M and
+// PT1H30M.
+struct CompactDuration {
+    int32_t months;   // years * 12 + months
+    int32_t days;     // weeks * 7 + days
+    int32_t seconds;  // hours * 3600 + minutes * 60 + seconds
+    int32_t nanos;    // same sign as seconds
+    uint8_t frac_digits;
+};
+
+// False when a part leaves int32, e.g. 2^31 seconds (about 68 years) of hours, minutes and
+// seconds.
+bool to_compact(const Duration& d, CompactDuration* out);
+// Years and months, days, and hours, minutes and seconds, each with the sign of its part.
+Duration to_duration(const CompactDuration& c);
+
 // Field by field, without normalizing. False on int32 overflow.
 bool duration_sum(const Duration& a, const Duration& b, Duration* out);
 

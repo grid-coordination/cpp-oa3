@@ -58,6 +58,12 @@
 #define OA3_MAX_PAYLOADS 1
 #endif
 
+// Distinct payload types kept per event, after the payload-type filter. Each type string is
+// stored once in the event and its payloads refer to it by index.
+#ifndef OA3_MAX_EVENT_TYPES
+#define OA3_MAX_EVENT_TYPES 4
+#endif
+
 // Values kept per event, across all its intervals' payloads: OA3_MAX_INTERVALS times the
 // values per interval. A PRICE and a GHG payload per interval need 2 and 50.
 #ifndef OA3_MAX_VALUES

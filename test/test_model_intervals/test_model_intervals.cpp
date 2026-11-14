@@ -27,6 +27,19 @@ static Duration dur(const char* s) {
     return d;
 }
 
+static oa3::CompactDuration cdur(const char* s) {
+    oa3::CompactDuration c{};
+    TEST_ASSERT_TRUE_MESSAGE(oa3::to_compact(dur(s), &c), s);
+    return c;
+}
+
+static uint8_t intern(Event& e, const char* type) {
+    const int i = oa3::find_type(e, type);
+    if (i >= 0) return static_cast<uint8_t>(i);
+    strcpy(e.types[e.type_count], type);
+    return e.type_count++;
+}
+
 static int64_t ux(const char* s) { return oa3::to_unix(dt(s)); }
 
 static void set_event_period(Event& e, const char* start, const char* duration) {
@@ -37,7 +50,7 @@ static void set_event_period(Event& e, const char* start, const char* duration) 
     }
     if (duration) {
         e.interval_period.has_duration = true;
-        e.interval_period.duration = dur(duration);
+        e.interval_period.duration = cdur(duration);
     }
 }
 
@@ -51,17 +64,17 @@ static oa3::Interval& add_interval(Event& e, int32_t id, const char* start,
     if (start || duration) {
         iv.has_interval_period = true;
         if (start) {
-            iv.interval_period.has_start = true;
-            iv.interval_period.start = dt(start);
+            iv.has_start = true;
+            iv.start = dt(start);
         }
         if (duration) {
-            iv.interval_period.has_duration = true;
-            iv.interval_period.duration = dur(duration);
+            iv.has_duration = true;
+            iv.duration = cdur(duration);
         }
     }
     if (type) {
         oa3::Payload& p = iv.payloads[iv.payload_count++];
-        strcpy(p.type, type);
+        p.type_index = intern(e, type);
         p.first_value = e.value_count;
         p.value_count = n;
         for (uint16_t i = 0; i < n; ++i) {
@@ -257,16 +270,22 @@ static void test_randomize_start_inherited_from_event() {
     Event& e = g_events[0];
     set_event_period(e, "2024-06-15T12:00:00Z", "PT1H");
     e.interval_period.has_randomize_start = true;
-    e.interval_period.randomize_start = dur("PT5M");
+    e.interval_period.randomize_start = cdur("PT5M");
     oa3::Interval& iv0 = add_price(e, 0, nullptr, nullptr, 1);
     iv0.has_interval_period = true;
-    iv0.interval_period.has_randomize_start = true;
-    iv0.interval_period.randomize_start = dur("PT10M");
+#ifdef OA3_INTERVAL_RANDOMIZE_START
+    iv0.has_randomize_start = true;
+    iv0.randomize_start = cdur("PT10M");
+#endif
     add_price(e, 1, nullptr, nullptr, 2);
     ResolvedInterval r[2];
     oa3::resolve_intervals(e, r, 2);
     TEST_ASSERT_TRUE(r[0].has_randomize_start);
+#ifdef OA3_INTERVAL_RANDOMIZE_START
     TEST_ASSERT_EQUAL_INT32(10, r[0].randomize_start.minutes);
+#else
+    TEST_ASSERT_EQUAL_INT32(5, r[0].randomize_start.minutes);
+#endif
     TEST_ASSERT_TRUE(r[1].has_randomize_start);
     TEST_ASSERT_EQUAL_INT32(5, r[1].randomize_start.minutes);
 
@@ -725,7 +744,7 @@ static void build_daily(Event& e, const char* event_duration) {
     for (int i = 0; i < 24; ++i) add_price(e, i, nullptr, nullptr, i);
     if (event_duration) {
         e.has_duration = true;
-        e.duration = dur(event_duration);
+        e.duration = cdur(event_duration);
     }
 }
 
@@ -788,7 +807,7 @@ static void test_event_duration_ignored_when_not_applicable() {
     memset(g_events, 0, sizeof(g_events));
     Event& e = g_events[0];
     e.has_duration = true;
-    e.duration = dur("P9999Y");
+    e.duration = cdur("P9999Y");
     add_price(e, 0, "2026-01-01T00:00:00Z", "PT1H", 1.0);
     add_price(e, 1, nullptr, nullptr, 2.0);
     TEST_ASSERT_FALSE(oa3::price_at(g_events, 1, ux("2026-01-01T01:30:00Z"), "PRICE", &p));
@@ -799,7 +818,7 @@ static void test_loop_with_explicit_starts() {
     // The price-server shape (own starts) looping daily.
     Event& e = g_events[0];
     e.has_duration = true;
-    e.duration = dur("P9999Y");
+    e.duration = cdur("P9999Y");
     add_price(e, 0, "2026-01-01T08:00:00Z", "PT1H", 1.0);
     add_price(e, 1, "2026-01-01T10:00:00Z", "PT1H", 2.0);
     PriceAt p;
@@ -839,7 +858,7 @@ static void test_fall_back_day_offset_starts() {
 static void test_sub_second_hull_does_not_loop() {
     Event& e = g_events[0];
     e.has_duration = true;
-    e.duration = dur("PT1H");
+    e.duration = cdur("PT1H");
     add_price(e, 0, "2026-11-13T00:00:00Z", "PT0.5S", 1.0);
     const oa3::EventExtent x = oa3::event_extent(e);
     TEST_ASSERT_TRUE(x.has_period);
@@ -889,7 +908,7 @@ static void test_resolver_resolve_matches_next() {
     for (uint16_t i = 0; i < e.interval_count; ++i) {
         TEST_ASSERT_TRUE(by_event.next(&a));
         const oa3::Interval& iv = e.intervals[i];
-        by_period.resolve(iv.has_interval_period ? &iv.interval_period : nullptr, iv.id, &b);
+        by_period.resolve(iv, &b);
         TEST_ASSERT_EQUAL_UINT16(a.index, b.index);
         TEST_ASSERT_EQUAL_INT32(a.id, b.id);
         TEST_ASSERT_EQUAL(a.has_period, b.has_period);

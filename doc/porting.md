@@ -148,9 +148,13 @@ On arduino-esp32 3.x, the port picks the client by scheme: a `NetworkClient` ins
 
 ## Storage
 
-`VenStorage` is the client's working memory: two `Event` arrays (`events` and `scratch`, `capacity` elements each; a fetch fills `scratch` and swaps on success, so a failure keeps the last good events) and the `JsonArena` the parser uses for one top-level object at a time. An `Event` is about 5.4 KB with the default capacities, so `OA3_MAX_EVENTS=2` costs about 21.6 KB in arrays plus the arena (16 KB by default on a 32-bit target). `StaticVenStorage<>` puts all of it in `.bss`; on the `ci/esp32` build with `OA3_MAX_EVENTS=2` it is 37,984 bytes.
+`VenStorage` is the client's working memory: two `Event` arrays (`events` and `scratch`, `capacity` elements each; a fetch fills `scratch` and swaps on success, so a failure keeps the last good events) and the `JsonArena` the parser uses for one top-level object at a time. An `Event` is 3,056 bytes with the default capacities, so `OA3_MAX_EVENTS=2` costs 12,224 bytes in arrays plus the arena (16 KB by default on a 32-bit target). `StaticVenStorage<>` puts all of it in `.bss`; on the `ci/esp32` build with `OA3_MAX_EVENTS=2` it is 28,640 bytes.
 
-MQTT notifications also need a `NotificationStorage` in `VenStorage::notifications`: the `Notification` a message is parsed into (an `Event` and a `Program`), the `/notifiers` and topics responses and the topic lists, 10,088 bytes on the `ci/esp32` build. A client with notifications off needs none of it.
+An `Event` stores each payload type string once (`OA3_MAX_EVENT_TYPES`, 4 by default; `payload_type()` reads it) and its durations as `CompactDuration`. An interval's own `randomizeStart` is kept only when the build defines `OA3_INTERVAL_RANDOMIZE_START`, which makes an `Interval` 72 bytes instead of 48 and an `Event` 3,656 bytes; without it the event's `randomizeStart` applies to every interval and an interval's is ignored. Define it for the whole build, library included, since it changes the struct.
+
+With `VenStorage::scratch` nullptr the client keeps one array: a fetch parses into `events` directly. A fetch that fails once its response has begun to parse, on its first page or a later one, clears the events, logs a warning, reports `has_data` false and no price in force, and retries as usual; a request that fails before any parsing leaves the events as they were. `StaticVenStorage<N, ArenaSize, false>` is the single-buffer form. For a WROOM without PSRAM, with `OA3_MAX_EVENTS=2` and an 8 KB arena, `StaticVenStorage<2, 8192, false>` is 14,344 bytes, against 20,448 with two arrays, and 29,824 with two arrays of the former 5,400-byte events.
+
+MQTT notifications also need a `NotificationStorage` in `VenStorage::notifications`: the `Notification` a message is parsed into (an `Event` and a `Program`), the `/notifiers` and topics responses and the topic lists, 7,744 bytes on the `ci/esp32` build. A client with notifications off needs none of it.
 
 On a board with PSRAM, allocate it there once at init and never free it:
 

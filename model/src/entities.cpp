@@ -73,12 +73,32 @@ const char* to_string(Operation op) {
     return "UNKNOWN";
 }
 
-const Payload* find_payload(const Interval& interval, const char* type) {
+const char* payload_type(const Event& event, const Payload& payload) {
+    if (payload.type_index >= event.type_count || payload.type_index >= OA3_MAX_EVENT_TYPES) {
+        return "";
+    }
+    return event.types[payload.type_index];
+}
+
+int find_type(const Event& event, const char* type) {
     if (type == nullptr) {
+        return -1;
+    }
+    for (uint8_t i = 0; i < event.type_count && i < OA3_MAX_EVENT_TYPES; ++i) {
+        if (strcmp(event.types[i], type) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+const Payload* find_payload(const Event& event, const Interval& interval, const char* type) {
+    const int t = find_type(event, type);
+    if (t < 0) {
         return nullptr;
     }
     for (uint8_t i = 0; i < interval.payload_count && i < OA3_MAX_PAYLOADS; ++i) {
-        if (strcmp(interval.payloads[i].type, type) == 0) {
+        if (interval.payloads[i].type_index == t) {
             return &interval.payloads[i];
         }
     }

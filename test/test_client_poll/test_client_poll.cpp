@@ -18,6 +18,8 @@ static oa3::StaticVenStorage<> storage;
 static oa3::VenClient client(http, clk, storage.storage());
 static oa3::StaticVenStorage<1> storage1;
 static oa3::VenClient client1(http, clk, storage1.storage());
+static oa3::StaticVenStorage<OA3_MAX_EVENTS, OA3_JSON_ARENA_SIZE, false> single_storage;
+static oa3::VenClient single(http, clk, single_storage.storage());
 
 static char programs_fixture[4096];
 static char events_fixture[16384];
@@ -53,6 +55,7 @@ void setUp() {
     rec.reset();
     client.stop();
     client1.stop();
+    single.stop();
 }
 void tearDown() {}
 
@@ -375,6 +378,99 @@ static void test_events_page_cap() {
     TEST_ASSERT_EQUAL_UINT32(900000, client.ms_until_due());
 }
 
+static void test_single_buffer_storage() {
+    const oa3::VenStorage mem = single_storage.storage();
+    TEST_ASSERT_NULL(mem.scratch);
+    TEST_ASSERT_NOT_NULL(mem.events);
+    TEST_ASSERT_TRUE(sizeof(single_storage) < sizeof(storage));
+}
+
+static void test_single_buffer_failure_clears() {
+    resolve(single, config());
+    http.push_ok(events_fixture);
+    single.loop();
+    ASSERT_STATUS(VenStatus::kOk, single.status().status);
+    const oa3::Event* events = single.events();
+    TEST_ASSERT_EQUAL_size_t(2, single.event_count());
+    TEST_ASSERT_TRUE(single.price().active);
+
+    // Fails before any parsing: the events stay.
+    clk.advance_s(900);
+    http.push_result(oa3::HttpResult::kTimeout);
+    single.loop();
+    ASSERT_STATUS(VenStatus::kTransportError, single.status().status);
+    TEST_ASSERT_EQUAL_size_t(2, single.event_count());
+    TEST_ASSERT_TRUE(single.status().has_data);
+    TEST_ASSERT_TRUE(single.price().active);
+
+    clk.advance_s(10);
+    const size_t prices = rec.prices;
+    http.push_status(200, "[{\"id\":");
+    single.loop();
+    ASSERT_STATUS(VenStatus::kParseError, single.status().status);
+    TEST_ASSERT_EQUAL_size_t(0, single.event_count());
+    TEST_ASSERT_FALSE(single.status().has_data);
+    TEST_ASSERT_FALSE(rec.last_status().has_data);
+    TEST_ASSERT_FALSE(single.price().active);
+    TEST_ASSERT_EQUAL_size_t(prices + 1, rec.prices);
+    TEST_ASSERT_FALSE(rec.last_price().active);
+    oa3::DateTime t;
+    TEST_ASSERT_FALSE(single.last_fetch(&t));
+
+    clk.advance_s(20);
+    http.push_ok(events_fixture);
+    single.loop();
+    ASSERT_STATUS(VenStatus::kOk, single.status().status);
+    TEST_ASSERT_EQUAL_PTR(events, single.events());
+    TEST_ASSERT_EQUAL_size_t(2, single.event_count());
+    TEST_ASSERT_TRUE(single.status().has_data);
+    TEST_ASSERT_TRUE(rec.last_price().active);
+    TEST_ASSERT_EQUAL_STRING("0.043034", rec.last_price().text);
+}
+
+static void test_single_buffer_page_failure_clears() {
+    resolve(single, config());
+    http.push_ok(kMixedPrograms);
+    single.loop();
+    TEST_ASSERT_EQUAL_size_t(1, single.event_count());
+    const size_t prices = rec.prices;
+
+    clk.advance_s(900);
+    http.push_ok(events_page(page_a, sizeof(page_a), "now", 50, 20), "&skip=0&limit=50");
+    http.push_result(oa3::HttpResult::kTimeout);
+    single.loop();
+    TEST_ASSERT_EQUAL_size_t(OA3_MAX_EVENTS, single.event_count());
+    TEST_ASSERT_EQUAL_size_t(prices, rec.prices);
+    single.loop();
+    ASSERT_STATUS(VenStatus::kTransportError, single.status().status);
+    TEST_ASSERT_EQUAL_size_t(0, single.event_count());
+    TEST_ASSERT_FALSE(single.status().has_data);
+    TEST_ASSERT_FALSE(rec.last_price().active);
+
+    clk.advance_s(10);
+    http.push_ok(kMixedPrograms, "&skip=0&limit=50");
+    single.loop();
+    ASSERT_STATUS(VenStatus::kOk, single.status().status);
+    TEST_ASSERT_EQUAL_size_t(1, single.event_count());
+    TEST_ASSERT_EQUAL_STRING("0.1", rec.last_price().text);
+}
+
+static void test_single_buffer_stop_between_pages_clears() {
+    resolve(single, config());
+    http.push_ok(kMixedPrograms);
+    single.loop();
+    TEST_ASSERT_EQUAL_size_t(1, single.event_count());
+
+    clk.advance_s(900);
+    http.push_ok(events_page(page_a, sizeof(page_a), "now", 50, 20), "&skip=0&limit=50");
+    single.loop();
+    TEST_ASSERT_EQUAL_size_t(OA3_MAX_EVENTS, single.event_count());
+    single.stop();
+    TEST_ASSERT_EQUAL_size_t(0, single.event_count());
+    oa3::DateTime t;
+    TEST_ASSERT_FALSE(single.last_fetch(&t));
+}
+
 int main() {
     fakes::load_file(OA3_FIXTURE_DIR "/price_server_programs.json", programs_fixture,
                      sizeof(programs_fixture));
@@ -396,5 +492,9 @@ int main() {
     RUN_TEST(test_events_page_failure_restarts);
     RUN_TEST(test_events_limit_ignored);
     RUN_TEST(test_events_page_cap);
+    RUN_TEST(test_single_buffer_storage);
+    RUN_TEST(test_single_buffer_failure_clears);
+    RUN_TEST(test_single_buffer_page_failure_clears);
+    RUN_TEST(test_single_buffer_stop_between_pages_clears);
     return UNITY_END();
 }
