@@ -4,6 +4,10 @@ All notable changes to `cpp-oa3` are recorded here. Format follows [Keep a Chang
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-14
+
+MQTT notifications, run overnight on the ESP32 by esp32-firmware: 16-18 hours each on an ESP32-POE-ISO-WROVER (with `exclusive_tls`), an ESP32-S3 and an ESP32-P4, with no failures and no heap drift.
+
 ### Changed
 
 - `start()` refuses a base URL that is not `https://` unless `allow_plaintext` is set. Schemes are case-insensitive.
