@@ -34,7 +34,7 @@ const char kUsage[] =
     "  --mqtt-client-id ID  MQTT client id (default oa3-ven-demo-<pid>)\n"
     "  --mqtt-uri URI       broker URI, used instead of the VTN's /notifiers\n"
     "  --mqtt-cacert PATH   trusted CA bundle for MQTTS (default: OpenSSL's default paths)\n"
-    "  --exclusive-tls      close MQTTS around each HTTPS request (as on the classic ESP32)\n"
+    "  --shared-tls         keep MQTTS open through HTTPS requests (default: one TLS session)\n"
     "  --notify-poll SECONDS\n"
     "                       poll period while subscribed (default 3600; 0: none)\n"
     "  --verbose            log at debug level\n"
@@ -144,7 +144,7 @@ int main(int argc, char** argv) {
     const char* mqtt_uri = nullptr;
     bool allow_plaintext = false;
     const char* mqtt_cacert = nullptr;
-    bool exclusive_tls = false;
+    bool exclusive_tls = true;
     unsigned long notify_poll_s = 0;
     bool has_notify_poll = false;
 
@@ -183,6 +183,8 @@ int main(int argc, char** argv) {
             mqtt_cacert = v;
         } else if (strcmp(argv[i], "--exclusive-tls") == 0) {
             exclusive_tls = true;
+        } else if (strcmp(argv[i], "--shared-tls") == 0) {
+            exclusive_tls = false;
         } else if ((v = flag_value(argc, argv, &i, "--notify-poll"))) {
             char* end;
             notify_poll_s = strtoul(v, &end, 10);

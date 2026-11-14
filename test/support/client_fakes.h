@@ -472,6 +472,7 @@ struct MqttRigN {
         c.notify_poll_period_s = 3600;
         c.notifications = oa3::NotificationMode::kMqtt;
         c.mqtt_client_id = "ven-1";
+        c.exclusive_tls = false;  // the shared-TLS suites; exclusive suites set true
         c.on_status = Recorder::on_status;
         c.on_price_change = Recorder::on_price;
         c.ctx = const_cast<Recorder*>(&rec);

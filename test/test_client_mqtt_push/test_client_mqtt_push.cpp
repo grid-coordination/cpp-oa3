@@ -196,7 +196,7 @@ static void test_break_exclusive_session_lost() {
 }
 
 // A broker that keeps no sessions: one snapshot after the subscription, then the resume finds
-// no session either, and polling every poll_period_s takes over instead of another snapshot.
+// no session either and resubscribes; the client stays push-only, with no further snapshot.
 static void test_gap_snapshot_once_per_connect() {
     rig.mqtt.keeps_sessions = false;
     oa3::VenConfig c = push_config(true);
@@ -207,8 +207,8 @@ static void test_gap_snapshot_once_per_connect() {
     loop_until(NotifyState::kConnected);
     TEST_ASSERT_EQUAL_size_t(7, rig.http.requests);
     TEST_ASSERT_EQUAL_size_t(2, rig.mqtt.connects);
-    TEST_ASSERT_EQUAL_UINT32(900000, rig.client.status().retry_in_ms);
-    run(840);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, rig.client.status().retry_in_ms);
+    run(24 * 3600);
     TEST_ASSERT_EQUAL_size_t(7, rig.http.requests);
     TEST_ASSERT_EQUAL_size_t(0, rig.http.unexpected);
 }

@@ -45,7 +45,7 @@ build-posix/oa3-ven-demo --program EELEC-012041131 --notifications mqtt --verbos
 | `--mqtt-client-id ID` | `oa3-ven-demo-<pid>` |
 | `--mqtt-uri URI` | none; used instead of the URIs `/notifiers` advertises |
 | `--mqtt-cacert PATH` | OpenSSL's default CA paths |
-| `--exclusive-tls` | off; closes the MQTTS session around each HTTPS request, as on the classic ESP32 |
+| `--shared-tls` | off; keeps the MQTTS session open through HTTPS requests. By default the demo holds one TLS session at a time (`--exclusive-tls` is accepted and is the default) |
 | `--notify-poll SECONDS` | 3600; the poll period while subscribed, 0 for none |
 | `--verbose` | off; logs at debug level, including each request URL |
 | `--once` | off; exits 0 at the first price report (with `mqtt`, at the first connected report after a price), 1 at the first failure |

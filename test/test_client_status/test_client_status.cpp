@@ -397,6 +397,7 @@ static void test_mqtt_copies_client_id_and_uri() {
     c.mqtt_client_id = id;
     c.mqtt_uri = uri;
     c.program_name = nullptr;
+    c.exclusive_tls = false;
     TEST_ASSERT_TRUE(mqtt_client.start(c));
     id[0] = 'X';
     uri[8] = 'X';

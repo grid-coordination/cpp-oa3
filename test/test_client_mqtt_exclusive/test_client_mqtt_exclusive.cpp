@@ -159,7 +159,8 @@ static void test_resume_without_session_resubscribes_without_snapshot() {
     TEST_ASSERT_EQUAL_size_t(calls + 3, rig.mqtt.calls);
     ASSERT_NOTIFY(NotifyState::kConnected, rig.client.status().notify);
     TEST_ASSERT_EQUAL_size_t(8, rig.http.requests);
-    TEST_ASSERT_EQUAL_UINT32(900000, rig.client.status().retry_in_ms);
+    // The poll period while subscribed stays in force; no fallback to poll_period_s.
+    TEST_ASSERT_EQUAL_UINT32(3600000, rig.client.status().retry_in_ms);
 }
 
 // The broker sends retained messages on every subscribe, after the /events snapshot here.

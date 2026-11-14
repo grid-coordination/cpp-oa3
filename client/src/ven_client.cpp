@@ -266,7 +266,6 @@ VenClient::VenClient(HttpTransport& http, Clock& clock, const VenStorage& storag
       _mqtt_step(MqttStep::kIdle),
       _mqtt_next_ms(0),
       _mqtt_open(false),
-      _mqtt_no_session(false),
       _broker(),
       _has_broker(false),
       _plain_mqtt_warned(false),
@@ -1056,7 +1055,7 @@ bool VenClient::subscribed() const {
 }
 
 uint32_t VenClient::period_s() const {
-    return subscribed() && !_mqtt_no_session ? _config.notify_poll_period_s : _config.poll_period_s;
+    return subscribed() ? _config.notify_poll_period_s : _config.poll_period_s;
 }
 
 void VenClient::schedule_poll(uint32_t from_ms) {
@@ -1116,7 +1115,6 @@ bool VenClient::mqtt_timed_step() const {
 void VenClient::mqtt_reset() {
     mqtt_close();
     _mqtt_step = MqttStep::kIdle;
-    _mqtt_no_session = false;
     _has_broker = false;
     _wanted_count = 0;
     _subscribed_count = 0;
@@ -1323,7 +1321,6 @@ void VenClient::mqtt_request(uint32_t now_ms) {
             !mqtt_subscribe(session_present, now_ms)) {
             return;
         }
-        _mqtt_no_session = false;
         if (clean || !session_present) {
             log_printf(_config.log, LogLevel::kInfo, "MQTT %s; fetching events after subscribing",
                        clean ? "clean session" : "session not kept by the broker");
@@ -1431,15 +1428,15 @@ void VenClient::mqtt_resume(uint32_t now_ms) {
     if (!mqtt_connect(false, &session_present, now_ms)) {
         return;
     }
-    // A snapshot here would loop on a broker that keeps no sessions; polling every
-    // poll_period_s bounds what the gap loses instead.
+    // A snapshot here would loop on a broker that keeps no sessions. The fetch this resume
+    // follows is current up to the suspend, so only what the VTN publishes between that fetch
+    // and the resubscribe can be missed.
     if (!session_present) {
         log_printf(_config.log, LogLevel::kInfo, "MQTT session not kept by the broker; subscribing");
     }
     if (!mqtt_subscribe(session_present, now_ms)) {
         return;
     }
-    _mqtt_no_session = !session_present;
     mqtt_go_live();
 }
 

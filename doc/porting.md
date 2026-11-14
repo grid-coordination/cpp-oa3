@@ -133,16 +133,16 @@ Two limits of this library:
 
 ### One TLS session at a time
 
-On the classic ESP32 a TLS session costs 42-45 KB of internal RAM and a second one does not fit, so an MQTTS session and an HTTPS request cannot be open together. Set `VenConfig::exclusive_tls`: the client then
+`VenConfig::exclusive_tls` is on by default: the VEN holds one TLS session, for an HTTPS request or for MQTTS, never both. On the classic ESP32 a TLS session costs 42-45 KB of internal RAM and a second one does not fit; on every board, one session at a time keeps the TLS cost the same. The client
 
 - fetches `/events` before connecting, and connects with `clean_session` false, so the broker queues QoS 1 notifications while the session is closed;
 - when that connect finds no session on the broker, fetches `/events` once more after subscribing, with one disconnect and resume around it, for what was published between the first fetch and the subscription;
 - calls `disconnect()` before every HTTPS request while a session may hold TLS, the hourly fallback poll included, and after a failed connect or subscribe, and resumes at the first `loop()` with no request due, so all pages of one fetch run before it reconnects;
-- subscribes again on a resume that finds no session, without another fetch, and polls `/events` every `poll_period_s` instead of `notify_poll_period_s` until a resume finds the session kept.
+- subscribes again on a resume that finds no session, without another fetch, and keeps `notify_poll_period_s`. With a broker that keeps no sessions, what the VTN publishes between a fetch and the resubscribe that follows it can be missed until the next fetch.
 
 With `notify_poll_period_s` 0 there is no HTTPS request while subscribed apart from the window fetches above, so the MQTTS session stays open and the board holds one TLS session.
 
-The rule for the port: `disconnect()` must free the TLS session whatever state the connection is in, because the client's next call may be an HTTPS `get()`. `exclusive_tls` has no effect with a plain `mqtt://` broker. Leave it off on a target that fits two TLS sessions: measured with arduino-esp32 3.3.11, an ESP32-S3 (Waveshare ESP32-S3-POE-ETH) kept 76.9 KB of internal RAM and an ESP32-P4 (Olimex ESP32-P4-DevKit) 140.9 KB at their lowest with an MQTTS session open through every HTTPS poll, a second session costing 44-48 KB on both.
+The rule for the port: `disconnect()` must free the TLS session whatever state the connection is in, because the client's next call may be an HTTPS `get()`. `exclusive_tls` has no effect with a plain `mqtt://` broker. Turning it off keeps the MQTTS session open through HTTPS requests, which needs a target that fits two TLS sessions: measured with arduino-esp32 3.3.11, an ESP32-S3 (Waveshare ESP32-S3-POE-ETH) kept 76.9 KB of internal RAM and an ESP32-P4 (Olimex ESP32-P4-DevKit) 140.9 KB at their lowest with an MQTTS session open through every HTTPS poll, a second session costing 44-48 KB on both.
 
 ## Plaintext
 

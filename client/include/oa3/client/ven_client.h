@@ -123,12 +123,12 @@ struct VenConfig {
     // The poll period while subscribed: 0 (no polling while subscribed) or at least
     // poll_period_s.
     uint32_t notify_poll_period_s = 3600;
-    // At most one TLS session at a time (the classic ESP32): an MQTTS session is closed
-    // before each HTTPS request and resumed after it, with clean_session false and QoS 1 so
-    // the broker queues what arrives meanwhile. /events is fetched before connecting, and
-    // again after subscribing when the broker kept no session. Until a resume finds the broker
-    // kept the session, events are polled every poll_period_s.
-    bool exclusive_tls = false;
+    // At most one TLS session at a time, the default: an MQTTS session is closed before each
+    // HTTPS request and resumed after it, with clean_session false and QoS 1 so the broker
+    // queues what arrives meanwhile. /events is fetched before connecting, and again after
+    // subscribing when the broker kept no session. false keeps the MQTTS session open through
+    // HTTPS requests, which needs RAM for two TLS sessions.
+    bool exclusive_tls = true;
     const char* mqtt_client_id = nullptr;  // required with kMqtt
     // Used instead of the /notifiers URIs, e.g. for a VTN that advertises an unreachable one.
     const char* mqtt_uri = nullptr;
@@ -388,7 +388,6 @@ private:
     MqttStep _mqtt_step;
     uint32_t _mqtt_next_ms;
     bool _mqtt_open;        // connect() called and disconnect() not since
-    bool _mqtt_no_session;  // exclusive_tls: the last connect found no session on the broker
     BrokerAddress _broker;
     bool _has_broker;
     bool _plain_mqtt_warned;

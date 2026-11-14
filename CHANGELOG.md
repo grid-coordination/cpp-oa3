@@ -4,6 +4,11 @@ All notable changes to `cpp-oa3` are recorded here. Format follows [Keep a Chang
 
 ## [Unreleased]
 
+### Changed
+
+- `VenConfig::exclusive_tls` is on by default: the client holds one TLS session at a time, closing MQTTS around each HTTPS request. Set it false to keep both open on a board with RAM for two sessions. The POSIX demo follows, with `--shared-tls` to turn it off.
+- With `exclusive_tls`, a resume that finds the broker kept no session keeps `notify_poll_period_s` (no polling with 0) instead of polling every `poll_period_s`.
+
 ## [0.3.0] - 2026-11-14
 
 Leaner storage for an ESP32 without PSRAM, where polling with one event array and an 8 KB arena now leaves 19 KB of internal heap during a fetch (1.6-3.6 KB on 0.2.0), and push-only notifications, which on an ESP32-POE-ISO-WROVER hold one TLS session and fetch only after a break or when a new event comes within the window.
