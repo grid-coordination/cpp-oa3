@@ -36,7 +36,7 @@ const char kUsage[] =
     "  --mqtt-cacert PATH   trusted CA bundle for MQTTS (default: OpenSSL's default paths)\n"
     "  --exclusive-tls      close MQTTS around each HTTPS request (as on the classic ESP32)\n"
     "  --notify-poll SECONDS\n"
-    "                       poll period while subscribed (default 3600)\n"
+    "                       poll period while subscribed (default 3600; 0: none)\n"
     "  --verbose            log at debug level\n"
     "  --once               exit 0 at the first price report (with mqtt: at the first\n"
     "                       connected report after a price), 1 at the first failure\n"
@@ -146,6 +146,7 @@ int main(int argc, char** argv) {
     const char* mqtt_cacert = nullptr;
     bool exclusive_tls = false;
     unsigned long notify_poll_s = 0;
+    bool has_notify_poll = false;
 
     for (int i = 1; i < argc; ++i) {
         const char* v;
@@ -185,7 +186,8 @@ int main(int argc, char** argv) {
         } else if ((v = flag_value(argc, argv, &i, "--notify-poll"))) {
             char* end;
             notify_poll_s = strtoul(v, &end, 10);
-            if (*end || notify_poll_s == 0) usage_error("bad --notify-poll ", v);
+            if (*end || *v == '\0') usage_error("bad --notify-poll ", v);
+            has_notify_poll = true;
         } else if ((v = flag_value(argc, argv, &i, "--cacert"))) {
             cacert = v;
         } else if (strcmp(argv[i], "--insecure") == 0) {
@@ -239,7 +241,7 @@ int main(int argc, char** argv) {
     config.allow_plaintext = allow_plaintext;
     config.mqtt_verify = !insecure;
     config.exclusive_tls = exclusive_tls;
-    if (notify_poll_s) config.notify_poll_period_s = static_cast<uint32_t>(notify_poll_s);
+    if (has_notify_poll) config.notify_poll_period_s = static_cast<uint32_t>(notify_poll_s);
     config.on_price_change = on_price;
     config.on_status = on_status;
     config.log.fn = oa3::posix::stderr_log;

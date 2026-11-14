@@ -227,7 +227,10 @@ static void test_filters_targets() {
     resolve(client, config());
     http.push_ok(kTargeted);
     client.loop();
-    TEST_ASSERT_EQUAL_size_t(3, client.event_count());
+    // e-mine arrives after e-theirs over the same hour, so supersedes it.
+    TEST_ASSERT_EQUAL_size_t(2, client.event_count());
+    TEST_ASSERT_EQUAL_STRING("e-open", client.events()[0].id);
+    TEST_ASSERT_EQUAL_STRING("e-mine", client.events()[1].id);
 }
 
 static void test_failure_keeps_last_good_data() {

@@ -76,6 +76,35 @@ private:
 
 EventExtent event_extent(const Event& event);
 
+// Which of two overlapping events is in force. A better priority wins. At equal priority,
+// which OpenADR leaves unspecified (User_Guide.md:457), the later modificationDateTime wins;
+// one without a modificationDateTime counts as older than any with one, and when both lack one,
+// or theirs are equal, the later order (arrival) wins. The order is total, so it is transitive.
+struct Precedence {
+    bool has_priority;
+    uint32_t priority;
+    bool has_modification_date_time;
+    DateTime modification_date_time;
+    size_t order;
+};
+
+Precedence precedence_of(const Event& event, size_t order);
+bool takes_precedence(const Precedence& a, const Precedence& b);
+
+// Moves *t to the end of each interval of event that has a payload_type value and contains
+// it, in interval order, but not past limit. False, leaving *t, when it does not move it, and
+// always for a looping event.
+bool extend_cover(const Event& event, const char* payload_type, const DateTime& limit,
+                  DateTime* t);
+
+// True when every interval of target that has a payload_type value is, within window, covered
+// by the union of those of the events in events[0..count) and extra (order count) that take
+// precedence over it, and at least one such interval meets the window. target's order is
+// target_order; events[target_order], when in range, is target itself and is skipped. A
+// looping event is never superseded and supersedes nothing.
+bool superseded(const Event& target, size_t target_order, const Event* events, size_t count,
+                const Event* extra, const TimeInterval& window, const char* payload_type);
+
 // PRICE, EXPORT_PRICE and GHG: one value per sub-interval when a payload packs several
 // (User_Guide.md:674-677, 730).
 bool is_unitary_payload_type(const char* type);
@@ -93,7 +122,8 @@ struct PriceAt {
     DateTime next_change;  // the first span boundary after now, active or not
 };
 
-// The value of payload_type in force at now across events. Returns out->active.
+// The value of payload_type in force at now across events, by takes_precedence() with the
+// array index as order. Returns out->active.
 bool price_at(const Event* events, size_t event_count, const DateTime& now,
               const char* payload_type, PriceAt* out);
 bool price_at(const Event* events, size_t event_count, int64_t now_unix,

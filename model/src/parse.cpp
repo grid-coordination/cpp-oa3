@@ -9,6 +9,8 @@
 #include <oa3/model/intervals.h>
 #include <oa3/model/time.h>
 
+#include "supersede.h"
+
 // Inlined into parse_one, the window-fit locals stay live under copy_event and add about
 // 600 bytes to the deepest stack on xtensa.
 #if defined(__GNUC__)
@@ -811,13 +813,26 @@ bool window_inverted(const ParseOptions* opt) {
     return w != nullptr && !w->end_indefinite && compare(w->end, w->start) < 0;
 }
 
+bool after_window(const DateTime& t, const TimeInterval& window) {
+    return !window.end_indefinite && compare(t, window.end) >= 0;
+}
+
+void lower(DateTime* later, const DateTime& t) {
+    if (later != nullptr && compare(t, *later) < 0) {
+        *later = t;
+    }
+}
+
 // False when the interval lies outside the window. Out of line so that the ResolvedInterval
 // is off the stack while payloads are copied.
 OA3_NOINLINE bool keep_in_window(const TimeInterval& window, bool dropped,
-                                 IntervalResolver* resolver, Interval* iv) {
+                                 IntervalResolver* resolver, Interval* iv, DateTime* later) {
     ResolvedInterval r;
     resolver->resolve(*iv, &r);
     if (r.has_period && !intersects(r.period, window)) {
+        if (after_window(r.period.start, window)) {
+            lower(later, r.period.start);
+        }
         return false;
     }
     if (dropped) {
@@ -862,7 +877,7 @@ ParseResult copy_intervals(JsonVariantConst v, Event* ev, const ParseOptions* op
         out->id = id.as<int32_t>();
         OA3_TRY(copy_period(get(o, "intervalPeriod", "interval_period"), out));
         if (window != nullptr) {
-            if (!keep_in_window(*window, dropped, &resolver, out)) {
+            if (!keep_in_window(*window, dropped, &resolver, out, opt->later_start)) {
                 dropped = true;
                 continue;
             }
@@ -995,35 +1010,44 @@ ParseResult copy_notification(JsonVariantConst v, Notification* out, const Parse
 
 enum class Kind : uint8_t { kProgram, kEvent, kNotification };
 
-// Where an event meets the window: first is its earliest instant in the window.
+// Where an event meets the window: first is its earliest instant in the window, and later
+// the earliest start at or after the window end of what lies outside it.
 struct WindowFit {
     bool in_window;
     DateTime first;
+    DateTime later;
 };
 
 class WindowFitBuilder {
 public:
-    explicit WindowFitBuilder(const TimeInterval& window) : _window(window), _hit(false), _first{} {}
+    explicit WindowFitBuilder(const TimeInterval& window)
+        : _window(window), _hit(false), _first{}, _later{INT64_MAX, 0, 0} {}
 
     void add(const ResolvedInterval& r) {
         _extent.add(r);
         if (r.has_period && intersects(r.period, _window) && (!_hit || compare(r.period.start, _first) < 0)) {
             _hit = true;
             _first = r.period.start;
+        } else if (r.has_period && after_window(r.period.start, _window)) {
+            lower(&_later, r.period.start);
         }
     }
 
     // An event without a resolvable period is kept, and is the first to give way.
     WindowFit finish(bool has_duration, const CompactDuration& duration) const {
         const EventExtent x = _extent.finish(has_duration, duration);
-        WindowFit f{true, DateTime{INT64_MAX, 0, 0}};
+        WindowFit f{true, DateTime{INT64_MAX, 0, 0}, DateTime{INT64_MAX, 0, 0}};
         if (!x.has_period) {
             return f;
         }
         if (x.looping) {
             f.in_window = intersects(x.span, _window);
             f.first = x.span.start;
+            if (!f.in_window && after_window(x.span.start, _window)) {
+                f.later = x.span.start;
+            }
         } else {
+            f.later = _later;
             f.in_window = _hit;
             f.first = _first;
         }
@@ -1038,6 +1062,7 @@ private:
     ExtentBuilder _extent;
     bool _hit;
     DateTime _first;
+    DateTime _later;
 };
 
 OA3_NOINLINE ParseResult fit_json(JsonObjectConst o, const TimeInterval& window, WindowFit* out) {
@@ -1081,6 +1106,157 @@ struct EventSlots {
     bool truncated;
 };
 
+// The event place_event is placing, still in its JSON, as a source of cover.
+struct JsonEvent {
+    JsonObjectConst o;
+    Precedence precedence;
+    bool looping;
+    bool has_period;
+    IntervalPeriod period;
+};
+
+OA3_NOINLINE void read_json_event(JsonObjectConst o, size_t order, JsonEvent* out) {
+    out->o = o;
+    Precedence& p = out->precedence;
+    p = Precedence{};
+    p.order = order;
+    JsonVariantConst priority = o["priority"];
+    if (priority.is<uint32_t>()) {
+        p.has_priority = true;
+        p.priority = priority.as<uint32_t>();
+    }
+    if (copy_datetime(get(o, "modificationDateTime", "modification_date_time"),
+                      &p.has_modification_date_time,
+                      &p.modification_date_time) != ParseResult::kOk) {
+        p.has_modification_date_time = false;
+    }
+    out->looping = !o["duration"].isNull();
+    out->has_period = false;
+    if (copy_period(get(o, "intervalPeriod", "interval_period"), &out->has_period, &out->period) !=
+        ParseResult::kOk) {
+        out->has_period = false;
+    }
+}
+
+bool json_priced(JsonObjectConst iv, const char* type) {
+    JsonVariantConst payloads = iv["payloads"];
+    if (!payloads.is<JsonArrayConst>()) {
+        return false;
+    }
+    for (JsonVariantConst p : payloads.as<JsonArrayConst>()) {
+        JsonVariantConst t = p["type"];
+        JsonVariantConst values = p["values"];
+        if (t.is<const char*>() && strcmp(t.as<const char*>(), type) == 0 &&
+            values.is<JsonArrayConst>() && values.as<JsonArrayConst>().size() > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+DateTime end_of(const TimeInterval& iv) {
+    return iv.end_indefinite ? DateTime{INT64_MAX, 0, 0} : iv.end;
+}
+
+// The resolved, priced intervals of a JSON event, one at a time.
+class JsonIntervals {
+public:
+    JsonIntervals(const JsonEvent& e, const char* type)
+        : _type(type), _resolver(e.has_period ? &e.period : nullptr), _it(), _end() {
+        JsonVariantConst intervals = e.o["intervals"];
+        if (!e.looping && intervals.is<JsonArrayConst>()) {
+            _it = intervals.as<JsonArrayConst>().begin();
+            _end = intervals.as<JsonArrayConst>().end();
+        }
+    }
+
+    bool next(TimeInterval* out) {
+        while (_it != _end) {
+            JsonVariantConst iv = *_it;
+            ++_it;
+            if (!iv.is<JsonObjectConst>()) {
+                continue;
+            }
+            Interval ip{};
+            copy_period(get(iv.as<JsonObjectConst>(), "intervalPeriod", "interval_period"), &ip);
+            ResolvedInterval r;
+            _resolver.resolve(ip, &r);
+            if (r.has_period && json_priced(iv.as<JsonObjectConst>(), _type)) {
+                *out = r.period;
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    const char* _type;
+    IntervalResolver _resolver;
+    JsonArrayConstIterator _it;
+    JsonArrayConstIterator _end;
+};
+
+bool extend_json(const void* source, const char* type, const DateTime& limit, DateTime* t) {
+    JsonIntervals it(*static_cast<const JsonEvent*>(source), type);
+    TimeInterval p;
+    bool moved = false;
+    while (it.next(&p)) {
+        if (contains_instant(p, *t)) {
+            const DateTime e = end_of(p);
+            *t = compare(e, limit) < 0 ? e : limit;
+            moved = true;
+        }
+    }
+    return moved;
+}
+
+// The JSON event, as superseded() would judge it against the events held.
+OA3_NOINLINE bool json_superseded(const JsonEvent& e, const EventSlots& slots,
+                                  const TimeInterval& window, const char* type) {
+    JsonIntervals it(e, type);
+    TimeInterval p;
+    bool any = false;
+    while (it.next(&p)) {
+        if (!intersects(p, window)) {
+            continue;
+        }
+        DateTime t = compare(p.start, window.start) > 0 ? p.start : window.start;
+        const DateTime a = end_of(p);
+        const DateTime b = end_of(window);
+        const DateTime end = compare(a, b) < 0 ? a : b;
+        any = true;
+        while (compare(t, end) < 0) {
+            bool moved = false;
+            for (size_t j = 0; j < *slots.count; ++j) {
+                if (takes_precedence(precedence_of(slots.events[j], j), e.precedence)) {
+                    moved = extend_cover(slots.events[j], type, end, &t) || moved;
+                }
+            }
+            if (!moved) {
+                return false;
+            }
+        }
+    }
+    return any;
+}
+
+// Full: the first held event that the others and the new one supersede.
+OA3_NOINLINE size_t find_superseded_slot(const EventSlots& slots, const JsonEvent& e,
+                                         const TimeInterval& window, const char* type) {
+    for (size_t i = 0; i < *slots.count; ++i) {
+        if (detail::superseded_core(slots.events[i], i, slots.events, *slots.count, &e.precedence,
+                                    extend_json, &e, window, type)) {
+            return i;
+        }
+    }
+    return *slots.count;
+}
+
+void remove_slot(EventSlots* slots, size_t i) {
+    memmove(&slots->events[i], &slots->events[i + 1], (*slots->count - 1 - i) * sizeof(Event));
+    --*slots->count;
+}
+
 ParseResult place_event(JsonVariantConst v, EventSlots* slots, const ParseOptions* opt) {
     if (!v.is<JsonObjectConst>()) {
         return ParseResult::kInvalidField;
@@ -1089,9 +1265,24 @@ ParseResult place_event(JsonVariantConst v, EventSlots* slots, const ParseOption
     WindowFit fit;
     OA3_TRY(fit_json(v.as<JsonObjectConst>(), window, &fit));
     if (!fit.in_window) {
+        lower(opt->later_start, fit.later);
         return ParseResult::kOk;
     }
     size_t index = *slots->count;
+    const char* type = opt->payload_types != nullptr && opt->payload_type_count == 1
+                           ? opt->payload_types[0]
+                           : nullptr;
+    if (index >= slots->capacity && index > 0 && type != nullptr) {
+        JsonEvent e;
+        read_json_event(v.as<JsonObjectConst>(), index, &e);
+        const size_t i = find_superseded_slot(*slots, e, window, type);
+        if (i < index) {
+            remove_slot(slots, i);
+            index = *slots->count;
+        } else if (json_superseded(e, *slots, window, type)) {
+            return ParseResult::kOk;
+        }
+    }
     if (index >= slots->capacity) {
         slots->truncated = true;
         size_t latest = 0;

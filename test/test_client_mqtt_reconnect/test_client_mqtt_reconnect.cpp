@@ -170,6 +170,7 @@ static void test_set_diff_with_session_present() {
     rig.start(c);
     push_discovery();
     rig.http.push_ok(rig.events, "/events?");
+    rig.http.push_ok(rig.events, "/events?");
     loop_until(NotifyState::kConnected);
     TEST_ASSERT_FALSE(rig.mqtt.last.clean_session);
     TEST_ASSERT_EQUAL_size_t(2, rig.client.subscription_count());
@@ -199,16 +200,21 @@ static void test_no_session_subscribes_all() {
     rig.start(c);
     push_discovery();
     rig.http.push_ok(rig.events, "/events?");
+    rig.http.push_ok(rig.events, "/events?");
     loop_until(NotifyState::kConnected);
     rig.mqtt.drop();
     rig.mqtt.keeps_sessions = false;
     push_discovery();
     rig.http.push_ok(rig.events, "/events?");
+    rig.http.push_ok(rig.events, "/events?");
     rig.client.loop();
     loop_until(NotifyState::kConnected);
+    TEST_ASSERT_EQUAL_size_t(0, rig.http.unexpected);
+    TEST_ASSERT_EQUAL_size_t(0, rig.http.pending());
+    // The connect and the resume after the snapshot that follows it.
     char s[256];
     snprintf(s, sizeof(s), "S:%s", kEventsAll);
-    TEST_ASSERT_EQUAL_size_t(2, rig.mqtt.count(s));
+    TEST_ASSERT_EQUAL_size_t(3, rig.mqtt.count(s));
 }
 
 static char page[16384];

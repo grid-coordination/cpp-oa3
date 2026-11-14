@@ -953,14 +953,14 @@ static void test_window_eviction_keeps_arrival_order() {
     if (OA3_MAX_EVENTS >= 3) {
         ASSERT_RESULT(ParseResult::kOk, oa3::parse_events(json, strlen(json), arena, events, 3, &count, &opt));
         TEST_ASSERT_TRUE(oa3::price_at(events, count, ux("2027-01-01T15:00:00Z"), "PRICE", &p));
-        TEST_ASSERT_EQUAL_DOUBLE(1, p.value->number);
+        TEST_ASSERT_EQUAL_DOUBLE(2, p.value->number);
     }
     ASSERT_RESULT(ParseResult::kTruncated, oa3::parse_events(json, strlen(json), arena, events, 2, &count, &opt));
     TEST_ASSERT_EQUAL_size_t(2, count);
     TEST_ASSERT_EQUAL_STRING("A", events[0].program_id);
     TEST_ASSERT_EQUAL_STRING("B", events[1].program_id);
     TEST_ASSERT_TRUE(oa3::price_at(events, count, ux("2027-01-01T15:00:00Z"), "PRICE", &p));
-    TEST_ASSERT_EQUAL_DOUBLE(1, p.value->number);
+    TEST_ASSERT_EQUAL_DOUBLE(2, p.value->number);
 }
 
 static void test_window_inverted_is_invalid() {

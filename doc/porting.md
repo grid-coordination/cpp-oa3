@@ -97,6 +97,22 @@ The client calls `poll(0)` at the start of each `loop()` while subscribed, and `
 
 A broker sends its retained messages on every new subscription, which can be after the client's `/events` snapshot. The client applies a retained CREATE or UPDATE only as an update of a stored event with a newer `modificationDateTime`, and drops a CREATE or UPDATE of an event the snapshot lacks when its `modificationDateTime` is before the snapshot, which covers a port that cannot report `retained`.
 
+Overlapping events: a VTN may publish a new event (a new id) that overlaps an older one instead of updating it, e.g. each hour an event from the current hour on. OpenADR leaves conflicting events of equal priority unspecified (User_Guide.md:457). The client's rule: a better priority wins; at equal priority the later `modificationDateTime` wins, an event without one counting as older than any with one, and when both lack one or theirs are equal, the later arrival. After each fetch and notification the client drops an event whose remaining part of the window the winning events cover, and when the event slots are full it drops such an event before keep-earliest truncation.
+
+Prices may be revised at any time, a forecast interval included. A CREATE or UPDATE replaces the stored copy when its `modificationDateTime` is later than the stored one's and is ignored when it is equal or earlier; when either copy lacks a `modificationDateTime`, it is applied. A revision sent as a DELETE of one id and a CREATE of another applies as both.
+
+### When the client fetches /events
+
+With notifications, `/events` is fetched:
+
+- in every connect cycle: after subscribing, or with `exclusive_tls` before connecting (see below). Every connection loss starts a new cycle with discovery, so a fetch follows every break, also when the broker resumes the session;
+- every `notify_poll_period_s` while subscribed, never when it is 0, and every `poll_period_s` while the channel is down;
+- when an oversized or unparseable live notification arrives, after a wall-clock step, and on `request_poll()`;
+- once something left out for starting at or after now + `horizon` comes within the window: an event or an interval of a kept event, from a fetch or from a notification. A poll that comes first covers it instead;
+- while the events are truncated (more in the window than `VenStorage::capacity`), once the earliest held event ends, or at once when a notification frees a slot, so an event left out for lack of a slot is fetched.
+
+With `notify_poll_period_s` 0 (push only), a subscribed client sends no request but the last kind, and `status().retry_in_ms` is `UINT32_MAX`. While subscribed the client is never `STALE`; while the channel is down it is `STALE` after `stale_after_polls` x `poll_period_s` from the later of the last fetch and the loss. The client logs at info when it stops polling on subscribing, and when it fetches after subscribing or for the window.
+
 ### arduino-esp32 3.x: arduino-mqtt
 
 Use 256dpi's arduino-mqtt (`MQTTClient`, 2.5.2 in esp32-firmware), which runs in the caller's task through `loop()`. ESP-IDF's esp-mqtt runs a task of its own, which the contract does not allow. Keep one `NetworkClientSecure net` and one `MQTTClient mqtt(8192, 512)` as members of the port: the constructor allocates the read and write buffers once, and the read buffer must hold the largest notification plus its topic and header.
@@ -120,8 +136,11 @@ Two limits of this library:
 On the classic ESP32 a TLS session costs 42-45 KB of internal RAM and a second one does not fit, so an MQTTS session and an HTTPS request cannot be open together. Set `VenConfig::exclusive_tls`: the client then
 
 - fetches `/events` before connecting, and connects with `clean_session` false, so the broker queues QoS 1 notifications while the session is closed;
+- when that connect finds no session on the broker, fetches `/events` once more after subscribing, with one disconnect and resume around it, for what was published between the first fetch and the subscription;
 - calls `disconnect()` before every HTTPS request while a session may hold TLS, the hourly fallback poll included, and after a failed connect or subscribe, and resumes at the first `loop()` with no request due, so all pages of one fetch run before it reconnects;
-- subscribes again on a resume that finds no session, without another fetch, and polls `/events` every `poll_period_s` instead of `notify_poll_period_s` until a resume finds the session kept. A first connect has no session, so the first fallback poll after it comes at `poll_period_s`.
+- subscribes again on a resume that finds no session, without another fetch, and polls `/events` every `poll_period_s` instead of `notify_poll_period_s` until a resume finds the session kept.
+
+With `notify_poll_period_s` 0 there is no HTTPS request while subscribed apart from the window fetches above, so the MQTTS session stays open and the board holds one TLS session.
 
 The rule for the port: `disconnect()` must free the TLS session whatever state the connection is in, because the client's next call may be an HTTPS `get()`. `exclusive_tls` has no effect with a plain `mqtt://` broker. Leave it off on a target that fits two TLS sessions: measured with arduino-esp32 3.3.11, an ESP32-S3 (Waveshare ESP32-S3-POE-ETH) kept 76.9 KB of internal RAM and an ESP32-P4 (Olimex ESP32-P4-DevKit) 140.9 KB at their lowest with an MQTTS session open through every HTTPS poll, a second session costing 44-48 KB on both.
 
