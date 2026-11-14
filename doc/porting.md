@@ -192,7 +192,7 @@ A device that needs a longer view raises both: a 72 h window needs `OA3_MAX_EVEN
 
 ## Library options and their costs
 
-Which configuration suits which ESP32 board, with measured flash and RAM per feature and the reasons a board is recommended, marginal or not recommended, is in esp32-firmware's [OpenADR 3 guide](https://github.com/electrification-bus/esp32-firmware/blob/main/doc/OpenADR3.md). The library's own options:
+Which configuration suits which ESP32 board is in esp32-firmware's OpenADR 3 guide: [what each feature costs](https://github.com/electrification-bus/esp32-firmware/blob/main/doc/OpenADR3.md#what-each-feature-costs) in flash, static RAM, internal RAM and PSRAM; [TLS](https://github.com/electrification-bus/esp32-firmware/blob/main/doc/OpenADR3.md#tls), the internal RAM per session and the sessions each mode holds; and [choosing a board](https://github.com/electrification-bus/esp32-firmware/blob/main/doc/OpenADR3.md#choosing-a-board), with the verdict rules and a verdict per board for polling and for notifications. The library's own options:
 
 | Option | Buys | Costs |
 |---|---|---|
