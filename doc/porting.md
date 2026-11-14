@@ -197,7 +197,7 @@ Measured with arduino-esp32 3.3.11 against the price server, one program, `OA3_M
 | Board | Configuration | Lowest internal heap |
 |---|---|---|
 | ESP32 without PSRAM (ESP32-POE-ISO, wESP32) | single buffer, 8 KB arena, storage allocated at startup, polling | 18.2 KB |
-| ESP32 without PSRAM | as above, plus MQTT notifications with `exclusive_tls` | 2.4 KB at the MQTT handshake; marginal |
+| ESP32 without PSRAM | as above, plus MQTT notifications with `exclusive_tls` | 264 B; not recommended (see below) |
 | ESP32 with PSRAM (ESP32-POE-ISO-WROVER) | double buffer, storage in PSRAM, polling | 40.4 KB |
 | ESP32 with PSRAM | plus MQTT notifications with `exclusive_tls` | 22-31 KB |
 | ESP32-S3 (Waveshare ESP32-S3-POE-ETH) | double buffer, MQTTS held open, `exclusive_tls` off | 77 KB |
@@ -219,7 +219,7 @@ What each option buys and costs:
 
 Recommended starting points:
 
-- **Lowest-cost appliance, ESP32 without PSRAM:** single buffer, 8 KB arena, storage allocated once at startup from the internal heap (never `.bss`), polling only. Treat MQTT notifications as experimental on this class.
+- **Lowest-cost appliance, ESP32 without PSRAM:** single buffer, 8 KB arena, storage allocated once at startup from the internal heap (never `.bss`), polling only. MQTT notifications are not recommended on this class: in a soak on an ESP32-POE-ISO without PSRAM, two fetches timed out with 344 bytes of internal heap free, and a burst of four notifications starved lwIP (mDNS could not allocate a 176-byte receive) and dropped the MQTT session. The client recovered, and the price stayed correct, but the board ran at the edge of memory.
 - **ESP32 with PSRAM:** double buffer and storage in PSRAM, MQTT notifications with `exclusive_tls`.
 - **ESP32-S3 or P4:** double buffer, MQTT notifications with `exclusive_tls` off; room for a 72 h horizon (`OA3_MAX_EVENTS` 4) and a display.
 
