@@ -170,7 +170,7 @@ auto* notes = new (notes_mem) oa3::NotificationStorage();
 const oa3::VenStorage storage{events, events + n, n, &arena, notes};
 ```
 
-Without notifications, leave the last member out. Without PSRAM, use `StaticVenStorage<>` (and a static `NotificationStorage`) and leave the internal heap to the TLS session. After a fetch, `arena.high_water()` shows how much of the arena one event needed; shrink `OA3_JSON_ARENA_SIZE` toward it, with margin, if RAM is short.
+Without notifications, leave the last member out. Without PSRAM, allocate the same pieces once at startup from the internal heap (`heap_caps_aligned_alloc(..., MALLOC_CAP_INTERNAL)`), not as `StaticVenStorage<>`: on the classic ESP32 about 38 KB of `.bss` shrinks the heap ESP-IDF starts with so far that boot aborts ("esp_timer: Not enough memory to create timer task") before the image is marked valid, and an OTA update rolls back. After a fetch, `arena.high_water()` shows how much of the arena one event needed; shrink `OA3_JSON_ARENA_SIZE` toward it, with margin, if RAM is short. For one price-server event it peaks at 6,984 bytes, so an 8 KB arena serves 24 h; on an ESP32-POE-ISO without PSRAM that raised the lowest internal heap during a fetch from 1.2 KB to 11.1 KB. `OA3_MAX_VALUES` is the number of values one event holds across all its intervals, so it must be at least the interval count (25 for a day of hourly prices); below that, parsing fails with `kCapacityExceeded`. MQTT notifications need about 19 KB more internal RAM (the MQTT client's buffers and `NotificationStorage`), which a classic ESP32 without PSRAM does not have.
 
 ## Sizing for 24 h
 
