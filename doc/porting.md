@@ -211,7 +211,7 @@ The window drops the intervals that have ended and keeps a held event's interval
 
 ## Library options and their costs
 
-Which configuration suits which ESP32 board is in esp32-firmware's OpenADR 3 guide: [what each feature costs](https://github.com/electrification-bus/esp32-firmware/blob/main/doc/OpenADR3.md#what-each-feature-costs) in flash, static RAM, internal RAM and PSRAM; [TLS](https://github.com/electrification-bus/esp32-firmware/blob/main/doc/OpenADR3.md#tls), the internal RAM per session and the sessions each mode holds; and [choosing a board](https://github.com/electrification-bus/esp32-firmware/blob/main/doc/OpenADR3.md#choosing-a-board), with the verdict rules and a verdict per board for polling and for notifications. The library's own options:
+Which configuration suits which ESP32 board is in esp32-firmware's board guide: [what each feature costs](https://github.com/electrification-bus/esp32-firmware/blob/main/doc/ChoosingABoard.md#what-each-feature-costs) in flash, static RAM, internal RAM and PSRAM; [TLS](https://github.com/electrification-bus/esp32-firmware/blob/main/doc/ChoosingABoard.md#tls), the internal RAM per session and the sessions each mode holds; and [verdicts](https://github.com/electrification-bus/esp32-firmware/blob/main/doc/ChoosingABoard.md#verdicts), with the verdict rules and a verdict per board for polling and for notifications. The library's own options:
 
 | Option | Buys | Costs |
 |---|---|---|
